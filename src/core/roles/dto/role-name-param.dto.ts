@@ -1,9 +1,15 @@
+﻿/**
+ * DTO validating the role name route parameter.
+ */
 import { ApiProperty } from '@nestjs/swagger';
 import { IsEnum } from 'class-validator';
 import { RoleName } from '../role.entity';
 
+/**
+ * Ensures the name parameter matches the RoleName enum.
+ */
 export class RoleNameParamDto {
-  @ApiProperty({ enum: RoleName })
+  @ApiProperty({ enum: RoleName, description: 'Target role name parameter.' })
   @IsEnum(RoleName)
   name: RoleName;
 }

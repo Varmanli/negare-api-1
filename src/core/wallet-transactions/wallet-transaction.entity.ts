@@ -1,4 +1,11 @@
-import { Column, Entity, Index, JoinColumn, ManyToOne } from 'typeorm';
+import {
+  Column,
+  Entity,
+  Index,
+  JoinColumn,
+  ManyToOne,
+  Unique,
+} from 'typeorm';
 import { BaseEntity } from '../../shared/base.entity';
 import { Wallet } from '../wallets/wallet.entity';
 import { User } from '../users/user.entity';
@@ -21,7 +28,10 @@ export enum WalletTransactionRefType {
 }
 
 @Index('IDX_wallet_transactions_created_at', ['createdAt'])
+@Index('IDX_wallet_transactions_status', ['status'])
+@Index('IDX_wallet_transactions_group_id', ['groupId'])
 @Entity({ name: 'wallet_transactions' })
+@Unique('UQ_wallet_tx_wallet_idempotency', ['walletId', 'idempotencyKey'])
 export class WalletTransaction extends BaseEntity {
   @Column({ name: 'wallet_id', type: 'uuid' })
   walletId: string;
@@ -45,8 +55,21 @@ export class WalletTransaction extends BaseEntity {
   })
   status: WalletTransactionStatus;
 
-  @Column({ type: 'bigint' })
+  @Column({
+    type: 'numeric',
+    precision: 18,
+    scale: 2,
+  })
   amount: string;
+
+  @Column({
+    name: 'balance_after',
+    type: 'numeric',
+    precision: 18,
+    scale: 2,
+    default: '0',
+  })
+  balanceAfter: string;
 
   @Column({
     name: 'ref_type',
@@ -59,19 +82,30 @@ export class WalletTransaction extends BaseEntity {
   @Column({ name: 'ref_id', type: 'varchar', nullable: true })
   refId: string | null;
 
-  @Column({ type: 'text', nullable: true })
+  @Column({ type: 'varchar', length: 1000, nullable: true })
   description: string | null;
 
   @Column({
     name: 'idempotency_key',
     type: 'varchar',
-    length: 128,
-    unique: true,
+    length: 255,
   })
   idempotencyKey: string;
 
+  @Column({ name: 'external_ref', type: 'varchar', length: 255, nullable: true })
+  externalRef: string | null;
+
+  @Column({ type: 'varchar', length: 64, nullable: true })
+  provider: string | null;
+
+  @Column({ name: 'group_id', type: 'uuid', nullable: true })
+  groupId: string | null;
+
   @Column({ type: 'jsonb', nullable: true })
   metadata: Record<string, unknown> | null;
+
+  @Column({ name: 'created_by_id', type: 'uuid', nullable: true })
+  createdById: string | null;
 
   @ManyToOne(() => Wallet, (wallet) => wallet.transactions, {
     onDelete: 'CASCADE',
@@ -84,4 +118,8 @@ export class WalletTransaction extends BaseEntity {
   })
   @JoinColumn({ name: 'user_id' })
   user: User;
+
+  @ManyToOne(() => User, { nullable: true })
+  @JoinColumn({ name: 'created_by_id' })
+  createdBy: User | null;
 }

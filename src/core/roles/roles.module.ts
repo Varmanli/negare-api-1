@@ -1,3 +1,6 @@
+/**
+ * RolesModule exposes the role controller/service for RBAC administration.
+ */
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { RolesController } from './roles.controller';
@@ -10,4 +13,7 @@ import { RolesService } from './roles.service';
   providers: [RolesService],
   exports: [RolesService, TypeOrmModule],
 })
+/**
+ * Nest module bundling the roles catalog for injection across the application.
+ */
 export class RolesModule {}

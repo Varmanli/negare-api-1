@@ -12,7 +12,12 @@ export class Wallet extends BaseEntity {
   @Column({ name: 'user_id', type: 'uuid', unique: true })
   userId: string;
 
-  @Column({ type: 'bigint', default: '0' })
+  @Column({
+    type: 'numeric',
+    precision: 18,
+    scale: 2,
+    default: '0',
+  })
   balance: string;
 
   @Column({

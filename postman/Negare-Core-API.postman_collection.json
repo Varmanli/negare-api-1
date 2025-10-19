@@ -1,0 +1,423 @@
+{
+  "info": {
+    "name": "Negare Core API",
+    "description": "Negare core authentication, profile, user, and role flows. توضیحات فارسی داخل درخواست‌ها آمده است.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "Auth",
+      "description": "Authentication lifecycle endpoints (OTP، رمز، توکن).",
+      "item": [
+        {
+          "name": "OTP Request",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"channel\": \"sms\",\n  \"phone\": \"09123456789\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": "{{baseUrl}}/auth/otp/request",
+            "description": "درخواست ارسال کد یک‌بارمصرف از طریق پیامک یا ایمیل. با تغییر مقدار channel و شناسه می‌توانید کانال دلخواه را تست کنید."
+          }
+        },
+        {
+          "name": "OTP Verify",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"channel\": \"sms\",\n  \"phone\": \"09123456789\",\n  \"code\": \"123456\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": "{{baseUrl}}/auth/otp/verify",
+            "description": "کد ارسال‌شده را تایید کرده و توکن موقت تنظیم رمز دریافت کنید. اسکریپت تست مقدار token را در {{setPasswordToken}} ذخیره می‌کند."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "let json;",
+                  "try { json = pm.response.json(); } catch (e) { json = null; }",
+                  "if (json && json.token) {",
+                  "  pm.collectionVariables.set('setPasswordToken', json.token);",
+                  "  pm.test('توکن تنظیم رمز ذخیره شد', function () { pm.expect(json.token).to.exist; });",
+                  "} else {",
+                  "  pm.test('پاسخ معتبر دریافت نشد', function () { pm.expect.fail('token در پاسخ یافت نشد'); });",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Set Password",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{setPasswordToken}}"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"password\": \"P@ssw0rd!\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": "{{baseUrl}}/auth/password/set",
+            "description": "با استفاده از توکن موقت OTP رمز عبور را تعیین یا تغییر دهید. پاسخ شامل accessToken و refreshToken است."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "let json;",
+                  "try { json = pm.response.json(); } catch (e) { json = null; }",
+                  "if (json && json.accessToken) {",
+                  "  pm.collectionVariables.set('accessToken', json.accessToken);",
+                  "  pm.collectionVariables.set('refreshToken', json.refreshToken || '');",
+                  "  pm.test('توکن‌های جدید ذخیره شدند', function () { pm.expect(json.accessToken).to.exist; });",
+                  "} else {",
+                  "  pm.test('پاسخ معتبر دریافت نشد', function () { pm.expect.fail('accessToken در پاسخ یافت نشد'); });",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Login",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"identifier\": \"user@example.com\",\n  \"password\": \"P@ssw0rd!\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": "{{baseUrl}}/auth/login",
+            "description": "ورود با ایمیل یا شماره موبایل و رمز عبور ذخیره‌شده. اسکریپت تست توکن‌ها را برای درخواست‌های بعدی ذخیره می‌کند."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "let json;",
+                  "try { json = pm.response.json(); } catch (e) { json = null; }",
+                  "if (json && json.accessToken) {",
+                  "  pm.collectionVariables.set('accessToken', json.accessToken);",
+                  "  pm.collectionVariables.set('refreshToken', json.refreshToken || '');",
+                  "  pm.test('توکن‌های ورود ذخیره شد', function () { pm.expect(json.accessToken).to.exist; });",
+                  "} else {",
+                  "  pm.test('پاسخ معتبر دریافت نشد', function () { pm.expect.fail('accessToken در پاسخ یافت نشد'); });",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Refresh",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{accessToken}}"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"refreshToken\": \"{{refreshToken}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": "{{baseUrl}}/auth/refresh",
+            "description": "چرخش جفت توکن با استفاده از refreshToken در بدنه (سازگار با ابزارهای CLI). اسکریپت تست مقدار جدید را ذخیره می‌کند."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "let json;",
+                  "try { json = pm.response.json(); } catch (e) { json = null; }",
+                  "if (json && json.accessToken) {",
+                  "  pm.collectionVariables.set('accessToken', json.accessToken);",
+                  "  pm.collectionVariables.set('refreshToken', json.refreshToken || '');",
+                  "  pm.test('توکن‌های تازه‌سازی ذخیره شد', function () { pm.expect(json.accessToken).to.exist; });",
+                  "} else {",
+                  "  pm.test('پاسخ معتبر دریافت نشد', function () { pm.expect.fail('accessToken در پاسخ یافت نشد'); });",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Refresh (Cookie Mode)",
+          "description": "سناریوی مرورگر که تنها به کوکی HttpOnly متکی است.",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": "{{baseUrl}}/auth/refresh",
+            "description": "سناریوی مرورگر: با استفاده از کوکی HttpOnly `refresh_token` بدون ارسال بدنه. ابتدا Login یا Set Password را اجرا کنید تا کوکی ست شود."
+          },
+          "response": []
+        },
+        {
+          "name": "Logout",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{accessToken}}"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"refreshToken\": \"{{refreshToken}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": "{{baseUrl}}/auth/logout",
+            "description": "ابطال رفرش توکن جاری. پس از موفقیت می‌توانید refresh را تکرار کنید تا خطای عدم اعتبار دریافت شود."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Profile",
+      "description": "پروفایل کاربر احراز هویت‌شده.",
+      "item": [
+        {
+          "name": "Get Profile",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{accessToken}}"
+              }
+            ],
+            "url": "{{baseUrl}}/core/profile",
+            "description": "نمایش اطلاعات پروفایل کاربر جاری. پاسخ در صورت موفقیت شامل success و data است."
+          }
+        },
+        {
+          "name": "Update Profile",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{accessToken}}"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Negare Pro\",\n  \"city\": \"Tehran\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": "{{baseUrl}}/core/profile",
+            "description": "ویرایش فیلدهای نمایه (نام، شهر، بیو، آواتار). برای ایمیل/موبایل از مسیر OTP استفاده کنید."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Roles",
+      "description": "مدیریت نقش‌ها و انتساب آن‌ها به کاربران (نیازمند نقش admin).",
+      "item": [
+        {
+          "name": "List Roles",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{accessToken}}"
+              }
+            ],
+            "url": "{{baseUrl}}/core/roles",
+            "description": "فهرست نقش‌های ثبت‌شده. در صورت نیاز می‌توانید پارامتر name را به صورت Query اضافه کنید."
+          }
+        },
+        {
+          "name": "Create Role",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{accessToken}}"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"supplier\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": "{{baseUrl}}/core/roles",
+            "description": "ایجاد نقش جدید با مقدار enum (`user`، `supplier`، `admin`)."
+          }
+        },
+        {
+          "name": "Assign Role To User",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{accessToken}}"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"userId\": \"00000000-0000-0000-0000-000000000001\",\n  \"roleId\": \"00000000-0000-0000-0000-000000000002\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": "{{baseUrl}}/core/user-roles",
+            "description": "اختصاص نقش مشخص به کاربر (شناسه‌ها باید از پایگاه داده استخراج شوند)."
+          }
+        },
+        {
+          "name": "Remove User Role",
+          "request": {
+            "method": "DELETE",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{accessToken}}"
+              }
+            ],
+            "url": "{{baseUrl}}/core/user-roles/{{userRoleId}}",
+            "description": "حذف نقش از کاربر با شناسه رکورد ارتباط. مقدار {{userRoleId}} را قبل از اجرا تنظیم کنید."
+          }
+        }
+      ]
+    }
+  ],
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "http://localhost:3000",
+      "type": "string"
+    },
+    {
+      "key": "accessToken",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "refreshToken",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "setPasswordToken",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "userRoleId",
+      "value": "00000000-0000-0000-0000-000000000100",
+      "type": "string"
+    }
+  ]
+}

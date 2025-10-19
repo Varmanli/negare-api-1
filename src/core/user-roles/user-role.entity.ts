@@ -1,3 +1,6 @@
+/**
+ * UserRole entity represents the many-to-many join between users and roles.
+ */
 import {
   Column,
   Entity,
@@ -11,6 +14,9 @@ import { User } from '../users/user.entity';
 
 @Entity({ name: 'user_roles' })
 @Unique(['userId', 'roleId'])
+/**
+ * Join entity storing associations while enforcing uniqueness per user/role pair.
+ */
 export class UserRole extends BaseEntity {
   @Column({ name: 'user_id', type: 'uuid' })
   userId: string;

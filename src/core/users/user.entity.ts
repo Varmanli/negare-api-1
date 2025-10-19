@@ -1,3 +1,6 @@
+/**
+ * User entity stores core identity information and relations to roles and wallets.
+ */
 import { Column, Entity, OneToMany, OneToOne } from 'typeorm';
 import { BaseEntity } from '../../shared/base.entity';
 import { UserRole } from '../user-roles/user-role.entity';
@@ -5,6 +8,9 @@ import { Wallet } from '../wallets/wallet.entity';
 import { WalletTransaction } from '../wallet-transactions/wallet-transaction.entity';
 
 @Entity({ name: 'users' })
+/**
+ * Represents an authenticated principal within the Negare platform.
+ */
 export class User extends BaseEntity {
   @Column({ type: 'varchar', unique: true })
   username: string;

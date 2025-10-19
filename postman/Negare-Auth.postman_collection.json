@@ -1,0 +1,657 @@
+{
+  "info": {
+    "_postman_id": "66917891-fbd7-44b8-bcd2-496010c354f5",
+    "name": "Negare Auth & Profile",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
+    "version": "2.0.0"
+  },
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "http://localhost:3000"
+    },
+    {
+      "key": "accessToken",
+      "value": ""
+    },
+    {
+      "key": "refreshToken",
+      "value": ""
+    },
+    {
+      "key": "setPwdToken",
+      "value": ""
+    },
+    {
+      "key": "userId",
+      "value": ""
+    },
+    {
+      "key": "userRoleId",
+      "value": ""
+    },
+    {
+      "key": "roleId",
+      "value": ""
+    },
+    {
+      "key": "walletWebhookSecret",
+      "value": "replace-with-strong-secret"
+    }
+  ],
+  "item": [
+    {
+      "name": "OTP Request (Email)",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"channel\": \"email\",\n  \"email\": \"user@example.com\"\n}"
+        },
+        "url": {
+          "raw": "{{baseUrl}}/auth/otp/request",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "auth",
+            "otp",
+            "request"
+          ]
+        },
+        "description": "ارسال کد تایید از طریق ایمیل."
+      },
+      "response": []
+    },
+    {
+      "name": "OTP Request (SMS)",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"channel\": \"sms\",\n  \"phone\": \"09121234567\"\n}"
+        },
+        "url": {
+          "raw": "{{baseUrl}}/auth/otp/request",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "auth",
+            "otp",
+            "request"
+          ]
+        },
+        "description": "ارسال کد تایید از طریق پیامک."
+      },
+      "response": []
+    },
+    {
+      "name": "OTP Verify",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"channel\": \"email\",\n  \"email\": \"user@example.com\",\n  \"code\": \"123456\"\n}"
+        },
+        "url": {
+          "raw": "{{baseUrl}}/auth/otp/verify",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "auth",
+            "otp",
+            "verify"
+          ]
+        },
+        "description": "تایید کد OTP و دریافت توکن تنظیم رمز."
+      },
+      "response": []
+    },
+    {
+      "name": "Set Password",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          },
+          {
+            "key": "Authorization",
+            "value": "Bearer {{setPwdToken}}"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"password\": \"P@ssw0rd!\"\n}"
+        },
+        "url": {
+          "raw": "{{baseUrl}}/auth/password/set",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "auth",
+            "password",
+            "set"
+          ]
+        },
+        "description": "ثبت رمز عبور جدید با استفاده از توکن OTP."
+      },
+      "response": [],
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "const json = pm.response.json();",
+              "if (json && json.accessToken) {",
+              "  pm.environment.set('accessToken', json.accessToken);",
+              "}",
+              "if (json && json.refreshToken) {",
+              "  pm.environment.set('refreshToken', json.refreshToken);",
+              "}"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Login",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"identifier\": \"user@example.com\",\n  \"password\": \"P@ssw0rd!\"\n}"
+        },
+        "url": {
+          "raw": "{{baseUrl}}/auth/login",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "auth",
+            "login"
+          ]
+        },
+        "description": "ورود با ایمیل یا موبایل و دریافت جفت توکن."
+      },
+      "response": [],
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "const json = pm.response.json();",
+              "if (json && json.accessToken) {",
+              "  pm.environment.set('accessToken', json.accessToken);",
+              "}",
+              "if (json && json.refreshToken) {",
+              "  pm.environment.set('refreshToken', json.refreshToken);",
+              "}"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Refresh Tokens",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          },
+          {
+            "key": "Authorization",
+            "value": "Bearer {{accessToken}}"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"refreshToken\": \"{{refreshToken}}\"\n}"
+        },
+        "url": {
+          "raw": "{{baseUrl}}/auth/refresh",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "auth",
+            "refresh"
+          ]
+        },
+        "description": "چرخش رفریش توکن و دریافت جفت جدید."
+      },
+      "response": [],
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('Refresh token request succeeded', function () {",
+              "  pm.response.to.have.status(200);",
+              "  pm.response.to.be.json;",
+              "});",
+              "",
+              "const json = pm.response.json();",
+              "if (json && json.accessToken) {",
+              "  pm.environment.set('accessToken', json.accessToken);",
+              "}",
+              "if (json && json.refreshToken) {",
+              "  pm.environment.set('refreshToken', json.refreshToken);",
+              "}"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Logout",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          },
+          {
+            "key": "Authorization",
+            "value": "Bearer {{accessToken}}"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"refreshToken\": \"{{refreshToken}}\"\n}"
+        },
+        "url": {
+          "raw": "{{baseUrl}}/auth/logout",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "auth",
+            "logout"
+          ]
+        },
+        "description": "باطل کردن رفریش توکن فعلی. فراخوانی دوباره بدون خطا خواهد بود."
+      },
+      "response": []
+    },
+    {
+      "name": "Get Profile",
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "Authorization",
+            "value": "Bearer {{accessToken}}"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/core/profile",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "core",
+            "profile"
+          ]
+        },
+        "description": "دریافت اطلاعات پروفایل کاربر جاری با استفاده از اکسس توکن."
+      },
+      "response": []
+    },
+    {
+      "name": "Update Profile",
+      "request": {
+        "method": "PATCH",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          },
+          {
+            "key": "Authorization",
+            "value": "Bearer {{accessToken}}"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"name\": \"Negare Pro\",\n  \"bio\": \"سرمایه‌گذار فعال\",\n  \"city\": \"Tehran\",\n  \"avatarUrl\": \"https://cdn.negare.com/avatar-new.png\"\n}"
+        },
+        "url": {
+          "raw": "{{baseUrl}}/core/profile",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "core",
+            "profile"
+          ]
+        },
+        "description": "ویرایش فیلدهای مجاز پروفایل. ارسال email یا phone خطای راهنما برمی‌گرداند."
+      },
+      "response": []
+    },
+    {
+      "name": "Wallet Balance",
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "Authorization",
+            "value": "Bearer {{accessToken}}"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/wallet/balance",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "wallet",
+            "balance"
+          ]
+        },
+        "description": "دریافت موجودی کیف پول کاربر جاری."
+      },
+      "response": []
+    },
+    {
+      "name": "Wallet Transactions",
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "Authorization",
+            "value": "Bearer {{accessToken}}"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/wallet/transactions?limit=20",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "wallet",
+            "transactions"
+          ],
+          "query": [
+            {
+              "key": "limit",
+              "value": "20"
+            }
+          ]
+        },
+        "description": "لیست تراکنش‌های کیف پول کاربر جاری با صفحه‌بندی ساده."
+      },
+      "response": []
+    },
+    {
+      "name": "Wallet Create Transaction",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          },
+          {
+            "key": "Authorization",
+            "value": "Bearer {{accessToken}}"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"type\": \"credit\",\n  \"amount\": 250000,\n  \"description\": \"افزایش موجودی بابت فروش محصول\",\n  \"idempotencyKey\": \"txn-1234-test\"\n}"
+        },
+        "url": {
+          "raw": "{{baseUrl}}/wallet/transactions",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "wallet",
+            "transactions"
+          ]
+        },
+        "description": "ایجاد تراکنش credit/debit برای کاربر جاری با اطمینان از idempotency key."
+      },
+      "response": []
+    },
+    {
+      "name": "Wallet Transfer",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          },
+          {
+            "key": "Authorization",
+            "value": "Bearer {{accessToken}}"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"toUserId\": \"{{userId}}\",\n  \"amount\": 200000,\n  \"description\": \"انتقال تستی در Postman\",\n  \"idempotencyKey\": \"xfer-postman-001\"\n}"
+        },
+        "url": {
+          "raw": "{{baseUrl}}/wallet/transfer",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "wallet",
+            "transfer"
+          ]
+        },
+        "description": "انتقال مبلغ بین کیف پول کاربر جاری و کاربر مقصد."
+      },
+      "response": []
+    },
+    {
+      "name": "Wallet Webhook Confirm",
+      "event": [
+        {
+          "listen": "prerequest",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "const body = pm.request.body.raw || '{}';",
+              "const secret = pm.environment.get('walletWebhookSecret') || '';",
+              "const signature = CryptoJS.HmacSHA256(body, secret).toString();",
+              "pm.request.headers.upsert({ key: 'X-Signature', value: signature });",
+              "pm.environment.set('lastWebhookSignature', signature);"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"userId\": \"{{userId}}\",\n  \"status\": \"success\",\n  \"type\": \"credit\",\n  \"externalRef\": \"PG-123456\",\n  \"amount\": 200000,\n  \"idempotencyKey\": \"pg-123456\"\n}"
+        },
+        "url": {
+          "raw": "{{baseUrl}}/wallet/webhook/mock",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "wallet",
+            "webhook",
+            "mock"
+          ]
+        },
+        "description": "تایید تراکنش pending از طریق وب‌هوک (امضای HMAC به صورت خودکار محاسبه می‌شود)."
+      },
+      "response": []
+    },
+    {
+      "name": "List Roles",
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "Authorization",
+            "value": "Bearer {{accessToken}}"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/core/roles",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "core",
+            "roles"
+          ]
+        },
+        "description": "لیست رول‌ها (نیازمند دسترسی ادمین)."
+      },
+      "response": []
+    },
+    {
+      "name": "Create Role",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          },
+          {
+            "key": "Authorization",
+            "value": "Bearer {{accessToken}}"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"name\": \"supplier\"\n}"
+        },
+        "url": {
+          "raw": "{{baseUrl}}/core/roles",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "core",
+            "roles"
+          ]
+        },
+        "description": "ایجاد رول جدید (ادمین)."
+      },
+      "response": []
+    },
+    {
+      "name": "Assign Role To User",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          },
+          {
+            "key": "Authorization",
+            "value": "Bearer {{accessToken}}"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"userId\": \"{{userId}}\",\n  \"roleId\": \"{{roleId}}\"\n}"
+        },
+        "url": {
+          "raw": "{{baseUrl}}/core/user-roles",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "core",
+            "user-roles"
+          ]
+        },
+        "description": "افزودن رول به کاربر (ادمین)."
+      },
+      "response": [],
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "const json = pm.response.json();",
+              "if (json && json.data && json.data.id) {",
+              "  pm.environment.set('userRoleId', json.data.id);",
+              "}"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Remove User Role",
+      "request": {
+        "method": "DELETE",
+        "header": [
+          {
+            "key": "Authorization",
+            "value": "Bearer {{accessToken}}"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/core/user-roles/{{userRoleId}}",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "core",
+            "user-roles",
+            "{{userRoleId}}"
+          ]
+        },
+        "description": "حذف رول از کاربر (ادمین)."
+      },
+      "response": []
+    }
+  ]
+}

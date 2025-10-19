@@ -4,6 +4,7 @@ import { UserRolesModule } from './user-roles/user-roles.module';
 import { UsersModule } from './users/users.module';
 import { WalletTransactionsModule } from './wallet-transactions/wallet-transactions.module';
 import { WalletsModule } from './wallets/wallets.module';
+import { ProfileModule } from './profile/profile.module';
 
 @Module({
   imports: [
@@ -12,6 +13,7 @@ import { WalletsModule } from './wallets/wallets.module';
     UserRolesModule,
     WalletsModule,
     WalletTransactionsModule,
+    ProfileModule,
   ],
   exports: [
     UsersModule,
@@ -19,6 +21,7 @@ import { WalletsModule } from './wallets/wallets.module';
     UserRolesModule,
     WalletsModule,
     WalletTransactionsModule,
+    ProfileModule,
   ],
 })
 export class CoreModule {}

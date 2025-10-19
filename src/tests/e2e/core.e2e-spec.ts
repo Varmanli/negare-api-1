@@ -6,6 +6,8 @@ import * as request from 'supertest';
 import { randomUUID } from 'node:crypto';
 import { newDb } from 'pg-mem';
 import * as pg from 'pg';
+import * as bcrypt from 'bcrypt';
+import * as cookieParser from 'cookie-parser';
 import { AuthModule } from '../../auth/auth.module';
 import { CoreModule } from '../../core/core.module';
 import { Role } from '../../core/roles/role.entity';
@@ -17,9 +19,20 @@ import { NotificationsModule } from '../../notifications/notifications.module';
 import { HttpExceptionFilter } from '../../common/filters/http-exception.filter';
 import { TracingInterceptor } from '../../common/interceptors/tracing.interceptor';
 import { TransformResponseInterceptor } from '../../common/interceptors/transform-response.interceptor';
+import { getRepositoryToken } from '@nestjs/typeorm';
+import { Repository } from 'typeorm';
+
+process.env.ACCESS_JWT_SECRET ??= 'test-access-secret';
+process.env.REFRESH_JWT_SECRET ??= 'test-refresh-secret';
+process.env.REFRESH_JWT_EXPIRES ??= '30d';
+process.env.MOCK_AUTH_ENABLED ??= 'true';
+process.env.COOKIE_SECURE ??= 'false';
+process.env.COOKIE_SAMESITE ??= 'strict';
+process.env.COOKIE_REFRESH_PATH ??= '/auth/refresh';
 
 describe('CoreModule (e2e)', () => {
   let app: INestApplication;
+  let userRepository: Repository<User>;
 
   const adminHeader = {
     'x-mock-user': JSON.stringify({ id: 'admin-user', roles: ['admin'] }),
@@ -91,6 +104,7 @@ describe('CoreModule (e2e)', () => {
       new TracingInterceptor(),
       new TransformResponseInterceptor(),
     );
+    nestApp.use(cookieParser());
 
     const config = new DocumentBuilder()
       .setTitle('Test API')
@@ -107,6 +121,7 @@ describe('CoreModule (e2e)', () => {
 
   beforeEach(async () => {
     app = await createTestingApp();
+    userRepository = app.get<Repository<User>>(getRepositoryToken(User));
   });
 
   afterEach(async () => {
@@ -140,11 +155,95 @@ describe('CoreModule (e2e)', () => {
       .expect(201);
   }
 
+  async function setUserPassword(
+    userId: string,
+    password = 'P@ssw0rd!',
+  ): Promise<void> {
+    const user = await userRepository.findOne({ where: { id: userId } });
+    if (!user) {
+      throw new Error('User not found');
+    }
+    user.passwordHash = await bcrypt.hash(password, 10);
+    await userRepository.save(user);
+  }
+
   function userHeader(userId: string, roles: string[] = ['user']) {
     return {
       'x-mock-user': JSON.stringify({ id: userId, roles }),
     };
   }
+
+  it('issues refresh token cookie and supports cookie + body refresh flows', async () => {
+    const email = 'authcookie@example.com';
+    const userId = await createUser('auth_cookie_user', email);
+    await setUserPassword(userId);
+
+    const loginRes = await request(app.getHttpServer())
+      .post('/auth/login')
+      .send({ identifier: email, password: 'P@ssw0rd!' })
+      .expect(200);
+
+    const loginCookies: string[] = loginRes.get('Set-Cookie') ?? [];
+    expect(loginRes.body.refreshToken).toBeDefined();
+    const loginCookie = loginCookies.find((cookie) =>
+      cookie.startsWith('refresh_token='),
+    );
+    expect(loginCookie).toBeDefined();
+
+    const cookieRefreshRes = await request(app.getHttpServer())
+      .post('/auth/refresh')
+      .set('Cookie', loginCookie as string)
+      .send({})
+      .expect(200);
+
+    const cookieRefreshCookies: string[] =
+      cookieRefreshRes.get('Set-Cookie') ?? [];
+    const cookieModeToken = cookieRefreshRes.body.refreshToken;
+    expect(cookieModeToken).toBeDefined();
+    const cookieFromCookieFlow = cookieRefreshCookies.find((cookie) =>
+      cookie.startsWith('refresh_token='),
+    );
+    expect(cookieFromCookieFlow).toBeDefined();
+
+    const legacyRefreshRes = await request(app.getHttpServer())
+      .post('/auth/refresh')
+      .send({ refreshToken: cookieModeToken })
+      .expect(200);
+
+    const legacyCookies: string[] = legacyRefreshRes.get('Set-Cookie') ?? [];
+    const latestCookie = legacyCookies.find((cookie) =>
+      cookie.startsWith('refresh_token='),
+    );
+    expect(latestCookie).toBeDefined();
+    const latestToken = legacyRefreshRes.body.refreshToken;
+    expect(latestToken).toBeDefined();
+
+    const logoutRes = await request(app.getHttpServer())
+      .post('/auth/logout')
+      .set('Cookie', latestCookie as string)
+      .send({})
+      .expect(200);
+
+    const clearedCookies: string[] = logoutRes.get('Set-Cookie') ?? [];
+    expect(
+      clearedCookies.some(
+        (cookie) =>
+          cookie.startsWith('refresh_token=') &&
+          (cookie.includes('Expires=') || cookie.includes('Max-Age=0')),
+      ),
+    ).toBe(true);
+
+    await request(app.getHttpServer())
+      .post('/auth/refresh')
+      .send({ refreshToken: latestToken })
+      .expect(401);
+
+    await request(app.getHttpServer())
+      .post('/auth/refresh')
+      .set('Cookie', latestCookie as string)
+      .send({})
+      .expect(401);
+  });
 
   it('creates user, credits and debits wallet, then returns balance', async () => {
     const userId = await createUser('e2e_user1', 'e2e1@example.com');
@@ -175,7 +274,7 @@ describe('CoreModule (e2e)', () => {
       .set(userHeader(userId))
       .expect(200);
 
-    expect(String(balanceRes.body.data.balance)).toEqual('1500');
+    expect(String(balanceRes.body.data.balance)).toEqual('1500.00');
   });
 
   it('prevents overdraft and returns structured error', async () => {
@@ -203,7 +302,7 @@ describe('CoreModule (e2e)', () => {
       .expect(400);
 
     expect(debitRes.body.success).toBe(false);
-    expect(debitRes.body.error.code).toEqual('INSUFFICIENT_BALANCE');
+    expect(debitRes.body.error.code).toEqual('INSUFFICIENT_FUNDS');
   });
 
   it('enforces owner or admin access for wallet operations', async () => {
@@ -254,7 +353,7 @@ describe('CoreModule (e2e)', () => {
       .set(userHeader(userId))
       .expect(200);
 
-    expect(String(balanceRes.body.data.balance)).toEqual('2000');
+    expect(String(balanceRes.body.data.balance)).toEqual('2000.00');
   });
 });
 

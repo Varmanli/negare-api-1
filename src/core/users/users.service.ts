@@ -1,3 +1,6 @@
+/**
+ * UsersService encapsulates TypeORM operations for querying and mutating user entities.
+ */
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, SelectQueryBuilder } from 'typeorm';
@@ -8,12 +11,19 @@ import { CreateUserDto } from './dto/create-user.dto';
 import { UpdateUserDto } from './dto/update-user.dto';
 
 @Injectable()
+/**
+ * Provides user CRUD utilities consumed by controllers and other services.
+ */
 export class UsersService {
   constructor(
     @InjectRepository(User)
     private readonly usersRepository: Repository<User>,
   ) {}
 
+  /**
+   * Retrieves users with optional cursor pagination and filters.
+   * @param query Filter, pagination, and search criteria.
+   */
   async findAll(query: FindUsersQueryDto): Promise<User[]> {
     const limit = query.limit ?? 25;
     const qb = this.buildRelationsQuery(limit);
@@ -37,6 +47,10 @@ export class UsersService {
     return qb.getMany();
   }
 
+  /**
+   * Loads a single user by id including roles and wallet associations.
+   * @param id User UUID.
+   */
   findById(id: string): Promise<User | null> {
     return this.usersRepository.findOne({
       where: { id },
@@ -47,6 +61,10 @@ export class UsersService {
     });
   }
 
+  /**
+   * Creates a new user record, hashing optional passwords and normalizing fields.
+   * @param dto Payload from controller.
+   */
   async create(dto: CreateUserDto): Promise<User> {
     const passwordHash = dto.password
       ? createHash('sha256').update(dto.password).digest('hex')
@@ -67,11 +85,17 @@ export class UsersService {
     return this.usersRepository.save(user);
   }
 
+  /**
+   * Applies updates to an existing user, including password rotation if provided.
+   * @param id User UUID.
+   * @param dto Mutation payload.
+   * @throws NotFoundException when the user does not exist.
+   */
   async update(id: string, dto: UpdateUserDto): Promise<User> {
     const user = await this.usersRepository.findOne({ where: { id } });
 
     if (!user) {
-      throw new NotFoundException(`User with id ${id} not found`);
+      throw new NotFoundException(`ò«—»—Ì »« ‘‰«”Â ${id} Ì«›  ‰‘œ.`);
     }
 
     if (dto.email !== undefined) {
@@ -108,6 +132,9 @@ export class UsersService {
     return this.usersRepository.save(user);
   }
 
+  /**
+   * Builds a query builder that eagerly loads roles and wallet data.
+   */
   private buildRelationsQuery(limit: number): SelectQueryBuilder<User> {
     return this.usersRepository
       .createQueryBuilder('user')

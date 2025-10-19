@@ -1,0 +1,63 @@
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    env_file:
+      - .env
+    environment:
+      - NODE_ENV=development
+      - CHOKIDAR_USEPOLLING=true
+      - WATCHPACK_POLLING=true
+      - DATABASE_URL=${DATABASE_URL}
+      - KAVENEGAR_API_KEY=${KAVENEGAR_API_KEY}
+      - KAVENEGAR_TEMPLATE=${KAVENEGAR_TEMPLATE}
+      - OTP_TTL_SECONDS=${OTP_TTL_SECONDS}
+      - HTTP_PROXY=
+      - HTTPS_PROXY=
+      - ALL_PROXY=
+      - NO_PROXY=api.kavenegar.com,.kavenegar.com,localhost,127.0.0.1
+      - SMTP_HOST=${SMTP_HOST}
+      - SMTP_PORT=${SMTP_PORT}
+      - SMTP_USER=${SMTP_USER}
+      - SMTP_PASS=${SMTP_PASS}
+      - MAIL_FROM=${MAIL_FROM}
+      - SET_PWD_JWT_SECRET=${SET_PWD_JWT_SECRET}
+      - SET_PWD_JWT_EXPIRES=${SET_PWD_JWT_EXPIRES}
+      - ACCESS_JWT_SECRET=${ACCESS_JWT_SECRET}
+      - ACCESS_JWT_EXPIRES=${ACCESS_JWT_EXPIRES}
+      - OTP_REQUEST_WINDOW=${OTP_REQUEST_WINDOW}
+      - OTP_REQUEST_MAX=${OTP_REQUEST_MAX}
+      - OTP_VERIFY_WINDOW=${OTP_VERIFY_WINDOW}
+      - OTP_VERIFY_MAX=${OTP_VERIFY_MAX}
+      - REDIS_HOST=${REDIS_HOST}
+      - REDIS_PORT=${REDIS_PORT}
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
+    ports:
+      - '3000:3000'
+      - '9229:9229'
+    volumes:
+      - .:/app:delegated
+      - /app/node_modules
+    depends_on:
+      - db
+      - redis
+    command: npx nodemon --exec "nest start --watch" --signal SIGTERM
+
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: negare
+    ports:
+      - '5433:5432'
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7-alpine
+volumes:
+  pgdata:

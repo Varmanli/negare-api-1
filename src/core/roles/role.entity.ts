@@ -1,7 +1,13 @@
+/**
+ * Role entity stores RBAC role names and relations to users.
+ */
 import { Column, Entity, OneToMany } from 'typeorm';
 import { BaseEntity } from '../../shared/base.entity';
 import { UserRole } from '../user-roles/user-role.entity';
 
+/**
+ * Enumerates canonical role names recognized by the platform.
+ */
 export enum RoleName {
   USER = 'user',
   SUPPLIER = 'supplier',
@@ -9,6 +15,9 @@ export enum RoleName {
 }
 
 @Entity({ name: 'roles' })
+/**
+ * Represents a single role definition within the RBAC system.
+ */
 export class Role extends BaseEntity {
   @Column({
     type: 'enum',
