@@ -1,19 +1,15 @@
-import { config } from 'dotenv';
-import { DataSource, DataSourceOptions } from 'typeorm';
+import 'reflect-metadata';
+import { DataSource } from 'typeorm';
 
-config();
+const url = process.env.DATABASE_URL;
+if (!url) throw new Error('DATABASE_URL is not defined');
 
-if (!process.env.DATABASE_URL) {
-  throw new Error('DATABASE_URL is not defined');
-}
-
-export const dataSourceOptions: DataSourceOptions = {
+export default new DataSource({
   type: 'postgres',
-  url: process.env.DATABASE_URL,
-  entities: ['src/**/*.entity.ts'],
-  migrations: ['src/migrations/*.ts'],
+  url,
   synchronize: false,
   logging: ['error', 'warn'],
-};
 
-export default new DataSource(dataSourceOptions);
+  entities: [__dirname + '/**/*.entity.{ts,js}'],
+  migrations: [__dirname + '/migrations/*.{ts,js}'],
+});
