@@ -1,5 +1,3 @@
-import { ObjectLiteral, SelectQueryBuilder } from 'typeorm';
-
 export interface PaginationResult<T> {
   data: T[];
   total: number;
@@ -8,16 +6,26 @@ export interface PaginationResult<T> {
   hasNext: boolean;
 }
 
-export async function paginate<T extends ObjectLiteral>(
-  queryBuilder: SelectQueryBuilder<T>,
+export const MAX_LIMIT = 100;
+
+export function clampPagination(
+  page: number | undefined,
+  limit: number | undefined,
+  maxLimit = MAX_LIMIT,
+): { page: number; limit: number; skip: number } {
+  const safePage = page && page > 0 ? page : 1;
+  const safeLimit =
+    limit && limit > 0 ? Math.min(limit, maxLimit) : Math.min(24, maxLimit);
+  const skip = (safePage - 1) * safeLimit;
+  return { page: safePage, limit: safeLimit, skip };
+}
+
+export function toPaginationResult<T>(
+  data: T[],
+  total: number,
   page: number,
   limit: number,
-): Promise<PaginationResult<T>> {
-  const [data, total] = await queryBuilder
-    .take(limit)
-    .skip((page - 1) * limit)
-    .getManyAndCount();
-
+): PaginationResult<T> {
   return {
     data,
     total,

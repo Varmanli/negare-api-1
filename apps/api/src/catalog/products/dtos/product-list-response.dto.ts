@@ -1,13 +1,12 @@
-
 import { ApiProperty } from '@nestjs/swagger';
-import { Product } from '../../entities/content/product.entity';
+import { ProductResponseDto } from './product-response.dto';
 
 export class ProductListResponseDto {
   @ApiProperty({
-    type: [Product],
+    type: [ProductResponseDto],
     description: 'Collection of products for the current page.',
   })
-  data: Product[];
+  data: ProductResponseDto[];
 
   @ApiProperty({
     description: 'Total number of products matching the applied filters.',

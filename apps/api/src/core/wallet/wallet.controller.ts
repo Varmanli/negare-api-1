@@ -36,10 +36,8 @@ import { WalletTransactionsQueryDto } from './dto/wallet-transactions-query.dto'
 import { WalletsService } from './wallets.service';
 import { CreateWalletTransactionDto } from './dto/create-wallet-transaction.dto';
 import { normalizeDecimalString } from './utils/amount.util';
-import {
-  WalletTransaction,
-  WalletTransactionStatus,
-} from './wallet-transaction.entity';
+import type { WalletTransaction } from '@prisma/client';
+import { WalletTransactionStatus } from '@app/prisma/prisma.constants';
 import { CreateWalletTransferDto } from './dto/create-wallet-transfer.dto';
 import { WalletWebhookDto } from './dto/wallet-webhook.dto';
 
@@ -323,7 +321,7 @@ export class WalletController {
     return {
       id: tx.id,
       type: tx.type,
-      amount: normalizeDecimalString(tx.amount),
+      amount: normalizeDecimalString(tx.amount.toString()),
       status: this.mapStatus(tx.status),
       balanceAfter: normalizeDecimalString(balanceAfter),
       createdAt: tx.createdAt.toISOString(),

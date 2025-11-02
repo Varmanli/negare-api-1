@@ -1,5 +1,5 @@
 import { CurrentUserPayload } from '@app/common/decorators/current-user.decorator';
-import { RoleName } from '@app/core/roles/entities/role.entity';
+import { RoleName } from '@app/prisma/prisma.constants';
 
 export function hasRole(
   user: CurrentUserPayload | undefined,
@@ -16,6 +16,8 @@ export function isSupplier(user: CurrentUserPayload | undefined): boolean {
   return hasRole(user, RoleName.SUPPLIER);
 }
 
-export function canManageProduct(user: CurrentUserPayload | undefined): boolean {
+export function canManageProduct(
+  user: CurrentUserPayload | undefined,
+): boolean {
   return isAdmin(user) || isSupplier(user);
 }

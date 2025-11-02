@@ -3,9 +3,9 @@
  */
 import { Column, Entity, OneToMany, OneToOne } from 'typeorm';
 import { BaseEntity } from '@app/shared/base.entity';
-import { UserRole } from '@app/core/roles/entities/role.entity';
+import { UserRole } from '@app/core/roles/entities/user-role.entity';
 import { Wallet } from '@app/core/wallet/wallet.entity';
-import { WalletTransaction } from '../wallet-transactions/wallet-transaction.entity';
+import { WalletTransaction } from '@app/core/wallet/wallet-transaction.entity';
 
 @Entity({ name: 'users' })
 /**

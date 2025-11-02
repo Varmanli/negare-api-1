@@ -1,24 +1,17 @@
-﻿/**
- * DTO describing the credential-based login payload accepted by AuthController.
- */
-import { ApiProperty } from '@nestjs/swagger';
-import { IsString } from 'class-validator';
+﻿import { ApiProperty } from '@nestjs/swagger';
+import { Transform } from 'class-transformer';
+import { IsString, MinLength } from 'class-validator';
 
-/**
- * Captures identifier/password pairs submitted during the login phase.
- */
 export class LoginDto {
-  @ApiProperty({
-    example: 'user@example.com or 09123456789',
-    description: 'Registered email address or mobile number used for login.',
-  })
+  @ApiProperty({ example: 'user@example.com یا 0912xxxxxxx' })
   @IsString()
-  identifier: string;
+  @Transform(({ value }) =>
+    typeof value === 'string' ? value.trim().toLowerCase() : value,
+  )
+  identifier!: string;
 
-  @ApiProperty({
-    example: 'P@ssw0rd!',
-    description: 'Account password that must match the stored credentials.',
-  })
+  @ApiProperty({ minLength: 8 })
   @IsString()
-  password: string;
+  @MinLength(8)
+  password!: string;
 }

@@ -37,7 +37,7 @@ export class WalletRateLimitService {
         meta: { action, windowSeconds, max, count },
       });
       throw new HttpException(
-        'تعداد درخواست‌ها از حد مجاز بیشتر است. لطفاً کمی بعد دوباره تلاش کنید.',
+        'تعداد تراکنش‌ها بیش از حد مجاز است. لطفاً بعداً تلاش کنید.',
         HttpStatus.TOO_MANY_REQUESTS,
       );
     }

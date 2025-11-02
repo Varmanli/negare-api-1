@@ -3,7 +3,7 @@ import { ConfigModule, ConfigService } from '@nestjs/config';
 import { MailService } from './mail.service';
 
 @Module({
-  imports: [ConfigModule.forRoot({ isGlobal: true })],
+  imports: [ConfigModule],
   providers: [
     {
       provide: 'MAIL_TRANSPORTER',

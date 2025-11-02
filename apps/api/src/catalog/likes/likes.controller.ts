@@ -19,7 +19,6 @@ import {
   ApiTooManyRequestsResponse,
   ApiUnauthorizedResponse,
   ApiForbiddenResponse,
-  getSchemaPath,
 } from '@nestjs/swagger';
 import { JwtAuthGuard } from '@app/core/auth/guards/jwt-auth.guard';
 import { CurrentUser, CurrentUserPayload } from '@app/common/decorators/current-user.decorator';
@@ -27,7 +26,6 @@ import { LikesService } from './likes.service';
 import { ToggleLikeDto } from './dtos/toggle-like.dto';
 import { ToggleLikeResponseDto } from './dtos/toggle-like-response.dto';
 import { ListQueryDto } from '../dtos/list-query.dto';
-import { Product } from '../entities/content/product.entity';
 import { ProductListResponseDto } from '../products/dtos/product-list-response.dto';
 
 @ApiTags('Catalog Likes')
@@ -83,33 +81,7 @@ export class ProfileLikesController {
   })
   @ApiOkResponse({
     description: 'Paginated liked products for the current user.',
-    schema: {
-      allOf: [
-        { $ref: getSchemaPath(ProductListResponseDto) },
-        {
-          properties: {
-            data: {
-              type: 'array',
-              items: {
-                allOf: [
-                  { $ref: getSchemaPath(Product) },
-                  {
-                    properties: {
-                      liked: {
-                        type: 'boolean',
-                        example: true,
-                        description:
-                          'Indicates that the authenticated user likes this product.',
-                      },
-                    },
-                  },
-                ],
-              },
-            },
-          },
-        },
-      ],
-    },
+    type: ProductListResponseDto,
   })
   @ApiUnauthorizedResponse({ description: 'Authentication required.' })
   @ApiForbiddenResponse({ description: 'Insufficient permissions to view liked products.' })
@@ -118,17 +90,14 @@ export class ProfileLikesController {
   async listLikedProducts(
     @Query() query: ListQueryDto,
     @CurrentUser() currentUser: CurrentUserPayload,
-  ): Promise<ProductListResponseDto & { data: Array<Product & { liked: true }> }> {
+  ): Promise<ProductListResponseDto> {
     const result = await this.likesService.listLikedProducts(
       currentUser.id,
       query,
     );
 
     return {
-      data: result.data.map((product) => ({
-        ...product,
-        liked: true as const,
-      })),
+      data: result.data,
       total: result.total,
       page: result.page,
       limit: result.limit,

@@ -1,29 +1,27 @@
 import { Injectable } from '@nestjs/common';
-import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
-import { WalletAuditLog } from './entities/wallet-audit-log.entity';
+import type { Prisma } from '@prisma/client';
+import { PrismaService } from '@app/prisma/prisma.service';
+import { JsonNull } from '@app/prisma/prisma.constants';
 
 interface AuditLogInput {
   userId?: string | null;
   walletId?: string | null;
   action: string;
-  meta?: Record<string, unknown> | null;
+  meta?: Prisma.InputJsonValue | null;
 }
 
 @Injectable()
 export class WalletAuditService {
-  constructor(
-    @InjectRepository(WalletAuditLog)
-    private readonly auditRepo: Repository<WalletAuditLog>,
-  ) {}
+  constructor(private readonly prisma: PrismaService) {}
 
-  log(input: AuditLogInput): Promise<WalletAuditLog> {
-    const record = this.auditRepo.create({
-      userId: input.userId ?? null,
-      walletId: input.walletId ?? null,
-      action: input.action,
-      meta: input.meta ?? null,
+  log(input: AuditLogInput) {
+    return this.prisma.walletAuditLog.create({
+      data: {
+        userId: input.userId ?? null,
+        walletId: input.walletId ?? null,
+        action: input.action,
+        meta: input.meta ?? JsonNull,
+      },
     });
-    return this.auditRepo.save(record);
   }
 }

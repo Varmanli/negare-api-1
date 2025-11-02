@@ -1,0 +1,517 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+  schemas  = ["public", "core", "content", "analytics"]
+}
+
+/**
+ * ============================
+ * Enums (با schema صحیح)
+ * ============================
+ */
+
+enum RoleName {
+  user
+  supplier
+  admin
+
+  @@map("role_name_enum")
+  @@schema("core")
+}
+
+enum WalletCurrency {
+  IRR
+
+  @@map("wallet_currency_enum")
+  @@schema("core")
+}
+
+enum WalletTransactionType {
+  credit
+  debit
+
+  @@map("wallet_transaction_type_enum")
+  @@schema("core")
+}
+
+enum WalletTransactionStatus {
+  pending
+  completed
+  failed
+
+  @@map("wallet_transaction_status_enum")
+  @@schema("core")
+}
+
+enum WalletTransactionRefType {
+  order
+  payout
+  adjustment
+
+  @@map("wallet_transaction_ref_type_enum")
+  @@schema("core")
+}
+
+enum OtpChannel {
+  sms
+  email
+
+  @@map("enum_otp_codes_channel")
+  @@schema("core")
+}
+
+enum OtpStatus {
+  active
+  used
+  expired
+  blocked
+
+  @@map("enum_otp_codes_status")
+  @@schema("core")
+}
+
+enum OtpPurpose {
+  signup
+  login
+  reset
+
+  @@map("enum_otp_codes_purpose")
+  @@schema("core")
+}
+
+enum PricingType {
+  FREE
+  SUBSCRIPTION
+  PAID
+  PAID_OR_SUBSCRIPTION
+
+  @@map("enum_content_products_pricingType")
+  @@schema("content")
+}
+
+enum UserStatus {
+  active
+  blocked
+  pending
+
+  @@schema("core")
+}
+
+enum SessionRevokeReason {
+  logout
+  rotation
+  reuse_detected
+  admin
+
+  @@schema("core")
+}
+
+enum AuditAction {
+  OTP_REQUEST
+  OTP_VERIFY_SUCCESS
+  OTP_VERIFY_FAIL
+  LOGIN_SUCCESS
+  LOGIN_FAIL
+  REFRESH_ROTATE
+  REFRESH_REUSE_DETECTED
+  LOGOUT
+  LOGOUT_ALL
+  PASSWORD_SET
+  PASSWORD_FORGOT_REQUEST
+  PASSWORD_RESET_SUCCESS
+  PASSWORD_RESET_FAIL
+
+  @@schema("core")
+}
+
+/**
+ * ============================
+ * Core domain (@@schema("core"))
+ * ============================
+ */
+
+model User {
+  id        String   @id @default(uuid()) @db.Uuid
+  createdAt DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt @db.Timestamptz(6)
+
+  // هویت
+  username String? @unique @db.Citext
+  email    String? @unique @db.Citext
+  phone    String? @unique @db.VarChar(32)
+
+  // پروفایل
+  name      String? @db.VarChar(255)
+  bio       String? @db.Text
+  city      String? @db.VarChar(255)
+  avatarUrl String? @db.VarChar(255)
+
+  // احراز هویت
+  passwordHash      String?    @db.VarChar(255)
+  isEmailVerified   Boolean    @default(false)
+  isPhoneVerified   Boolean    @default(false)
+  status            UserStatus @default(active)
+  passwordChangedAt DateTime?  @db.Timestamptz(6)
+  lastLoginAt       DateTime?  @db.Timestamptz(6)
+
+  // حذف منطقی
+  deletedAt DateTime? @db.Timestamptz(6)
+
+  userRoles           UserRole[]
+  wallet              Wallet?
+  walletTransactions  WalletTransaction[]  @relation("WalletTransactionsUser")
+  createdTransactions WalletTransaction[]  @relation("WalletTransactionsCreatedBy")
+  productSuppliers    ProductSupplier[]    @relation("ProductSuppliersUser")
+  bookmarks           Bookmark[]
+  likes               Like[]
+  downloads           ProductDownload[]
+  productViews        ProductView[]
+  walletAuditLogs     WalletAuditLog[]
+  sessions            Session[]
+  passwordResetTokens PasswordResetToken[]
+  auditLogs           AuditLog[]
+
+  @@index([status], map: "users_status_idx")
+  @@index([createdAt], map: "users_created_at_idx")
+  @@map("users")
+  @@schema("core")
+}
+
+model Session {
+  id     String @id @default(uuid()) @db.Uuid
+  userId String @db.Uuid
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // Refresh Token (هش و شناسه)
+  refreshJti       String @unique @db.Uuid
+  refreshTokenHash String @db.VarChar(255)
+
+  // بایندینگ سبک دستگاه/شبکه (برای امنیت و گزارش)
+  uaHash          String? @db.VarChar(64) // hash(user-agent)
+  ipHash          String? @db.VarChar(64) // مثلا /24
+  fingerprintHash String? @db.VarChar(64) // اختیاری
+
+  // زمان‌بندی
+  createdAt  DateTime @default(now()) @db.Timestamptz(6)
+  lastUsedAt DateTime @default(now()) @db.Timestamptz(6)
+  expiresAt  DateTime @db.Timestamptz(6)
+
+  // ابطال
+  revokedAt      DateTime?            @db.Timestamptz(6)
+  revokeReason   SessionRevokeReason?
+  rotatedFromJti String?              @db.Uuid // لینک به جفت قبلی
+
+  @@index([userId, revokedAt], map: "session_user_active_idx") // active = revokedAt IS NULL (استفاده در کوئری)
+  @@index([expiresAt], map: "session_expiry_idx")
+  @@map("sessions")
+  @@schema("core")
+}
+
+// توکن ریست پسورد (اگر Reset را با توکن DB می‌خواهی؛
+// اگر می‌خواهی با JWT-ticket انجام دهی، می‌توانی کلاً این مدل را حذف کنی)
+model PasswordResetToken {
+  id     String @id @default(uuid()) @db.Uuid
+  userId String @db.Uuid
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  tokenHash String    @unique @db.VarChar(255) // هشِ توکن یکبارمصرف
+  createdAt DateTime  @default(now()) @db.Timestamptz(6)
+  expiresAt DateTime  @db.Timestamptz(6)
+  usedAt    DateTime? @db.Timestamptz(6)
+
+  // ردیابی اختیاری
+  uaHash String? @db.VarChar(64)
+  ipHash String? @db.VarChar(64)
+
+  @@index([expiresAt], map: "pwd_reset_expiry_idx")
+  @@map("password_reset_tokens")
+  @@schema("core")
+}
+
+// لاگ امنیتی/رویدادها
+model AuditLog {
+  id     String  @id @default(uuid()) @db.Uuid
+  userId String? @db.Uuid
+  user   User?   @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  action  AuditAction
+  meta    Json?
+  ipHash  String?     @db.VarChar(64)
+  uaHash  String?     @db.VarChar(64)
+  traceId String?     @db.VarChar(64)
+
+  createdAt DateTime @default(now()) @db.Timestamptz(6)
+
+  @@index([createdAt], map: "audit_created_at_idx")
+  @@index([userId, createdAt], map: "audit_user_time_idx")
+  @@map("audit_logs")
+  @@schema("core")
+}
+
+model Role {
+  id        String     @id @default(uuid()) @db.Uuid
+  createdAt DateTime   @default(now()) @db.Timestamptz(6)
+  updatedAt DateTime   @updatedAt @db.Timestamptz(6)
+  name      RoleName   @unique
+  userRoles UserRole[]
+
+  @@map("roles")
+  @@schema("core")
+}
+
+model UserRole {
+  id        String   @id @default(uuid()) @db.Uuid
+  createdAt DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt @db.Timestamptz(6)
+  userId    String   @map("user_id") @db.Uuid
+  roleId    String   @map("role_id") @db.Uuid
+  user      User     @relation(fields: [userId], references: [id])
+  role      Role     @relation(fields: [roleId], references: [id])
+
+  @@unique([userId, roleId])
+  @@map("user_roles")
+  @@schema("core")
+}
+
+model Wallet {
+  id           String              @id @default(uuid()) @db.Uuid
+  createdAt    DateTime            @default(now()) @db.Timestamptz(6)
+  updatedAt    DateTime            @updatedAt @db.Timestamptz(6)
+  userId       String              @unique @map("user_id") @db.Uuid
+  balance      Decimal             @default("0") @db.Decimal(18, 2)
+  currency     WalletCurrency      @default(IRR)
+  user         User                @relation(fields: [userId], references: [id])
+  transactions WalletTransaction[]
+  auditLogs    WalletAuditLog[]
+
+  @@map("wallets")
+  @@schema("core")
+}
+
+model WalletTransaction {
+  id             String                   @id @default(uuid()) @db.Uuid
+  createdAt      DateTime                 @default(now()) @db.Timestamptz(6)
+  updatedAt      DateTime                 @updatedAt @db.Timestamptz(6)
+  walletId       String                   @map("wallet_id") @db.Uuid
+  userId         String                   @map("user_id") @db.Uuid
+  type           WalletTransactionType
+  status         WalletTransactionStatus  @default(pending)
+  amount         Decimal                  @db.Decimal(18, 2)
+  balanceAfter   Decimal                  @default("0") @map("balance_after") @db.Decimal(18, 2)
+  refType        WalletTransactionRefType @map("ref_type")
+  refId          String?                  @map("ref_id") @db.VarChar(255)
+  description    String?                  @db.VarChar(1000)
+  idempotencyKey String                   @map("idempotency_key") @db.VarChar(255)
+  externalRef    String?                  @map("external_ref") @db.VarChar(255)
+  provider       String?                  @db.VarChar(64)
+  groupId        String?                  @map("group_id") @db.Uuid
+  metadata       Json?                    @db.JsonB
+  createdById    String?                  @map("created_by_id") @db.Uuid
+  wallet         Wallet                   @relation(fields: [walletId], references: [id])
+  user           User                     @relation("WalletTransactionsUser", fields: [userId], references: [id])
+  createdBy      User?                    @relation("WalletTransactionsCreatedBy", fields: [createdById], references: [id])
+
+  @@unique([walletId, idempotencyKey], map: "UQ_wallet_tx_wallet_idempotency")
+  @@index([createdAt], map: "IDX_wallet_transactions_created_at")
+  @@index([status], map: "IDX_wallet_transactions_status")
+  @@index([groupId], map: "IDX_wallet_transactions_group_id")
+  @@index([userId], map: "IDX_wallet_transactions_user_id")
+  @@map("wallet_transactions")
+  @@schema("core")
+}
+
+model WalletAuditLog {
+  id        String   @id @default(uuid()) @db.Uuid
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  userId    String?  @map("user_id") @db.Uuid
+  walletId  String?  @map("wallet_id") @db.Uuid
+  action    String   @db.VarChar(64)
+  meta      Json?    @db.JsonB
+  user      User?    @relation(fields: [userId], references: [id])
+  wallet    Wallet?  @relation(fields: [walletId], references: [id])
+
+  @@index([userId, createdAt], map: "IDX_wallet_audit_user_created")
+  @@index([walletId, createdAt], map: "IDX_wallet_audit_wallet_created")
+  @@map("wallet_audit_logs")
+  @@schema("core")
+}
+
+/**
+ * ============================
+ * Content domain (@@schema("content"))
+ * ============================
+ */
+
+model Product {
+  id             BigInt            @id @default(autoincrement()) @db.BigInt
+  slug           String            @unique @db.VarChar(255)
+  title          String            @db.VarChar(255)
+  description    String?           @db.Text
+  coverUrl       String?           @db.VarChar(255)
+  pricingType    PricingType
+  price          Decimal?          @db.Decimal(12, 2)
+  active         Boolean           @default(true)
+  publishedAt    DateTime?         @db.Timestamptz(6)
+  viewsCount     Int               @default(0)
+  downloadsCount Int               @default(0)
+  likesCount     Int               @default(0)
+  fileId         BigInt?           @unique @map("file_id") @db.BigInt
+  createdAt      DateTime          @default(now()) @db.Timestamptz(6)
+  updatedAt      DateTime          @updatedAt @db.Timestamptz(6)
+  file           ProductFile?      @relation("ProductFile", fields: [fileId], references: [id])
+  assets         ProductAsset[]
+  supplierLinks  ProductSupplier[] @relation("ProductSuppliersProduct")
+  categoryLinks  ProductCategory[]
+  tagLinks       ProductTag[]
+  bookmarks      Bookmark[]
+  likes          Like[]
+  views          ProductView[]
+  downloads      ProductDownload[]
+
+  @@map("products")
+  @@schema("content")
+}
+
+model ProductAsset {
+  id        BigInt   @id @default(autoincrement()) @db.BigInt
+  productId BigInt   @map("product_id") @db.BigInt
+  url       String   @db.VarChar(255)
+  alt       String?  @db.VarChar(255)
+  sortOrder Int      @default(0) @map("order")
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  product   Product  @relation(fields: [productId], references: [id])
+
+  @@map("product_assets")
+  @@schema("content")
+}
+
+model ProductFile {
+  id           BigInt   @id @default(autoincrement()) @db.BigInt
+  storageKey   String   @db.VarChar(255)
+  originalName String?  @db.VarChar(255)
+  size         BigInt?  @db.BigInt
+  mimeType     String?  @db.VarChar(255)
+  meta         Json?    @db.JsonB
+  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  product      Product? @relation("ProductFile")
+
+  @@map("product_files")
+  @@schema("content")
+}
+
+model Category {
+  id           BigInt            @id @default(autoincrement()) @db.BigInt
+  name         String            @db.VarChar(255)
+  slug         String            @unique @db.VarChar(255)
+  parentId     BigInt?           @map("parent_id") @db.BigInt
+  parent       Category?         @relation("CategoryHierarchy", fields: [parentId], references: [id])
+  children     Category[]        @relation("CategoryHierarchy")
+  productLinks ProductCategory[]
+
+  @@map("categories")
+  @@schema("content")
+}
+
+model ProductCategory {
+  productId  BigInt   @map("product_id") @db.BigInt
+  categoryId BigInt   @map("category_id") @db.BigInt
+  product    Product  @relation(fields: [productId], references: [id])
+  category   Category @relation(fields: [categoryId], references: [id])
+
+  @@id([productId, categoryId])
+  @@map("product_categories")
+  @@schema("content")
+}
+
+model Tag {
+  id           BigInt       @id @default(autoincrement()) @db.BigInt
+  name         String       @unique @db.VarChar(255)
+  slug         String       @unique @db.VarChar(255)
+  productLinks ProductTag[]
+
+  @@map("tags")
+  @@schema("content")
+}
+
+model ProductTag {
+  productId BigInt  @map("product_id") @db.BigInt
+  tagId     BigInt  @map("tag_id") @db.BigInt
+  product   Product @relation(fields: [productId], references: [id])
+  tag       Tag     @relation(fields: [tagId], references: [id])
+
+  @@id([productId, tagId])
+  @@map("product_tags")
+  @@schema("content")
+}
+
+model ProductSupplier {
+  productId BigInt  @map("product_id") @db.BigInt
+  userId    String  @map("user_id") @db.Uuid
+  product   Product @relation("ProductSuppliersProduct", fields: [productId], references: [id])
+  user      User    @relation("ProductSuppliersUser", fields: [userId], references: [id])
+
+  @@id([productId, userId])
+  @@map("product_suppliers")
+  @@schema("content")
+}
+
+model Bookmark {
+  userId    String   @map("user_id") @db.Uuid
+  productId BigInt   @map("product_id") @db.BigInt
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  user      User     @relation(fields: [userId], references: [id])
+  product   Product  @relation(fields: [productId], references: [id])
+
+  @@id([userId, productId])
+  @@map("bookmarks")
+  @@schema("content")
+}
+
+model Like {
+  userId    String   @map("user_id") @db.Uuid
+  productId BigInt   @map("product_id") @db.BigInt
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  user      User     @relation(fields: [userId], references: [id])
+  product   Product  @relation(fields: [productId], references: [id])
+
+  @@id([userId, productId])
+  @@index([productId], map: "likes_product_idx")
+  @@map("likes")
+  @@schema("content")
+}
+
+/**
+ * ============================
+ * Analytics domain (@@schema("analytics"))
+ * ============================
+ */
+
+model ProductView {
+  id        BigInt   @id @default(autoincrement()) @db.BigInt
+  productId BigInt   @map("product_id") @db.BigInt
+  userId    String?  @map("user_id") @db.Uuid
+  ip        String?  @db.VarChar(255)
+  ua        String?  @db.VarChar(255)
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  product   Product  @relation(fields: [productId], references: [id])
+  user      User?    @relation(fields: [userId], references: [id])
+
+  @@map("product_views")
+  @@schema("analytics")
+}
+
+model ProductDownload {
+  id        BigInt   @id @default(autoincrement()) @db.BigInt
+  productId BigInt   @map("product_id") @db.BigInt
+  userId    String   @map("user_id") @db.Uuid
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  product   Product  @relation(fields: [productId], references: [id])
+  user      User     @relation(fields: [userId], references: [id])
+
+  @@map("product_downloads")
+  @@schema("analytics")
+}

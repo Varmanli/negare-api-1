@@ -22,7 +22,7 @@ import { FindRolesQueryDto } from './dto/find-roles-query.dto';
 import { RoleNameParamDto } from './dto/role-name-param.dto';
 import { UpdateRoleDto } from './dto/update-role.dto';
 import { RolesService } from './roles.service';
-import { RoleName } from '@app/core/roles/entities/role.entity';
+import { RoleName } from '@app/prisma/prisma.constants';
 
 @ApiTags('Roles')
 @ApiBearerAuth('bearer')

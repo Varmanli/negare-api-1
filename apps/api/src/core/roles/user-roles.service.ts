@@ -1,59 +1,85 @@
-﻿import { ConflictException, Injectable, NotFoundException } from '@nestjs/common';
-import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { ConflictException, Injectable, NotFoundException } from '@nestjs/common';
+import type { Prisma as PrismaNamespace } from '@prisma/client';
+import { PrismaClientKnownRequestError } from '@app/prisma/prisma.constants';
+import { PrismaService } from '@app/prisma/prisma.service';
 import { AssignRoleDto } from './dto/assign-role.dto';
 import { FindUserRolesQueryDto } from './dto/find-user-roles-query.dto';
-import { UserRole } from '@app/core/roles/entities/user-role.entity';
+
+type UserRoleWithRelations = PrismaNamespace.UserRoleGetPayload<{
+  include: {
+    user: true;
+    role: true;
+  };
+}>;
 
 @Injectable()
 export class UserRolesService {
-  constructor(
-    @InjectRepository(UserRole)
-    private readonly userRolesRepository: Repository<UserRole>,
-  ) {}
+  constructor(private readonly prisma: PrismaService) {}
 
-  async findAll(query: FindUserRolesQueryDto): Promise<UserRole[]> {
-    const qb = this.userRolesRepository
-      .createQueryBuilder('userRole')
-      .leftJoinAndSelect('userRole.user', 'user')
-      .leftJoinAndSelect('userRole.role', 'role')
-      .orderBy('userRole.createdAt', 'DESC');
+  async findAll(query: FindUserRolesQueryDto): Promise<UserRoleWithRelations[]> {
+    const where: PrismaNamespace.UserRoleWhereInput = {};
 
     if (query.userId) {
-      qb.andWhere('userRole.userId = :userId', { userId: query.userId });
+      where.userId = query.userId;
     }
 
     if (query.roleId) {
-      qb.andWhere('userRole.roleId = :roleId', { roleId: query.roleId });
+      where.roleId = query.roleId;
     }
 
     if (query.roleName) {
-      qb.andWhere('role.name = :roleName', { roleName: query.roleName });
+      where.role = { name: query.roleName };
     }
 
-    return qb.getMany();
+    return this.prisma.userRole.findMany({
+      where,
+      include: {
+        user: true,
+        role: true,
+      },
+      orderBy: { createdAt: 'desc' },
+    });
   }
 
-  async assignRole(dto: AssignRoleDto): Promise<UserRole> {
-    const existing = await this.userRolesRepository.findOne({
-      where: { userId: dto.userId, roleId: dto.roleId },
+  async assignRole(dto: AssignRoleDto): Promise<UserRoleWithRelations> {
+    const existing = await this.prisma.userRole.findUnique({
+      where: {
+        userId_roleId: {
+          userId: dto.userId,
+          roleId: dto.roleId,
+        },
+      },
     });
 
     if (existing) {
       throw new ConflictException('Role already assigned to this user.');
     }
 
-    const userRole = this.userRolesRepository.create({
-      userId: dto.userId,
-      roleId: dto.roleId,
+    return this.prisma.userRole.create({
+      data: {
+        userId: dto.userId,
+        roleId: dto.roleId,
+      },
+      include: {
+        user: true,
+        role: true,
+      },
     });
-    return this.userRolesRepository.save(userRole);
   }
 
   async remove(id: string): Promise<void> {
-    const result = await this.userRolesRepository.delete(id);
-    if (result.affected === 0) {
-      throw new NotFoundException(`User role assignment with id ${id} not found.`);
+    try {
+      await this.prisma.userRole.delete({ where: { id } });
+    } catch (error) {
+      if (
+        error instanceof PrismaClientKnownRequestError &&
+        error.code === 'P2025'
+      ) {
+        throw new NotFoundException(
+          `User role assignment with id ${id} not found.`,
+        );
+      }
+      throw error;
     }
   }
 }

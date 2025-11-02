@@ -19,7 +19,6 @@ import {
   ApiTooManyRequestsResponse,
   ApiUnauthorizedResponse,
   ApiForbiddenResponse,
-  getSchemaPath,
 } from '@nestjs/swagger';
 import { JwtAuthGuard } from '@app/core/auth/guards/jwt-auth.guard';
 import { CurrentUser, CurrentUserPayload } from '@app/common/decorators/current-user.decorator';
@@ -27,7 +26,6 @@ import { BookmarksService } from './bookmarks.service';
 import { ToggleBookmarkDto } from './dtos/toggle-bookmark.dto';
 import { ToggleBookmarkResponseDto } from './dtos/toggle-bookmark-response.dto';
 import { ListQueryDto } from '../dtos/list-query.dto';
-import { Product } from '../entities/content/product.entity';
 import { ProductListResponseDto } from '../products/dtos/product-list-response.dto';
 
 @ApiTags('Catalog Bookmarks')
@@ -83,33 +81,7 @@ export class ProfileBookmarksController {
   })
   @ApiOkResponse({
     description: 'Paginated bookmarked products for the current user.',
-    schema: {
-      allOf: [
-        { $ref: getSchemaPath(ProductListResponseDto) },
-        {
-          properties: {
-            data: {
-              type: 'array',
-              items: {
-                allOf: [
-                  { $ref: getSchemaPath(Product) },
-                  {
-                    properties: {
-                      bookmarked: {
-                        type: 'boolean',
-                        example: true,
-                        description:
-                          'Indicates that the authenticated user bookmarked this product.',
-                      },
-                    },
-                  },
-                ],
-              },
-            },
-          },
-        },
-      ],
-    },
+    type: ProductListResponseDto,
   })
   @ApiUnauthorizedResponse({ description: 'Authentication required.' })
   @ApiForbiddenResponse({ description: 'Insufficient permissions to view bookmarked products.' })
@@ -118,17 +90,14 @@ export class ProfileBookmarksController {
   async listBookmarkedProducts(
     @Query() query: ListQueryDto,
     @CurrentUser() currentUser: CurrentUserPayload,
-  ): Promise<ProductListResponseDto & { data: Array<Product & { bookmarked: true }> }> {
+  ): Promise<ProductListResponseDto> {
     const result = await this.bookmarksService.listBookmarkedProducts(
       currentUser.id,
       query,
     );
 
     return {
-      data: result.data.map((product) => ({
-        ...product,
-        bookmarked: true as const,
-      })),
+      data: result.data,
       total: result.total,
       page: result.page,
       limit: result.limit,

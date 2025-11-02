@@ -1,10 +1,10 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+import type { WalletTransaction } from '@prisma/client';
 import {
-  WalletTransaction,
   WalletTransactionRefType,
   WalletTransactionStatus,
   WalletTransactionType,
-} from '../wallet-transaction.entity';
+} from '@app/prisma/prisma.constants';
 
 export class WalletTransactionResponseDto {
   @ApiProperty()
@@ -49,11 +49,11 @@ export class WalletTransactionResponseDto {
     this.userId = entity.userId;
     this.type = entity.type;
     this.status = entity.status;
-    this.amount = entity.amount;
+    this.amount = entity.amount.toString();
     this.refType = entity.refType;
     this.refId = entity.refId ?? null;
     this.description = entity.description ?? null;
-    this.metadata = entity.metadata ?? null;
+    this.metadata = entity.metadata as Record<string, unknown> | null;
     this.idempotencyKey = entity.idempotencyKey;
     this.createdAt = entity.createdAt;
   }

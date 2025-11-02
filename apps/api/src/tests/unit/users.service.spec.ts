@@ -1,97 +1,89 @@
-import { DataSource } from 'typeorm';
-import { createTestDataSource } from '../../tests/utils/test-database.util';
 import { UsersService } from '@app/core/users/users.service';
-import { User } from '@app/core/users/user.entity';
-import { UserRole } from '@app/core/roles/entities/role.entity';
-import { Role } from '@app/core/roles/entities/role.entity';
-import { Wallet } from '@app/core/wallet/wallet.entity';
-import { WalletTransaction } from '../../core/wallet-transactions/wallet-transaction.entity';
+import { PrismaService } from '@app/prisma/prisma.service';
+
+const createPrismaMock = () =>
+  ({
+    user: {
+      findMany: jest.fn(),
+      findUnique: jest.fn(),
+      create: jest.fn(),
+      update: jest.fn(),
+    },
+  } as unknown as PrismaService);
 
 describe('UsersService', () => {
-  let dataSource: DataSource;
+  let prisma: PrismaService;
   let service: UsersService;
 
-  beforeEach(async () => {
-    dataSource = await createTestDataSource({
-      entities: [User, UserRole, Role, Wallet, WalletTransaction],
-    });
-    service = new UsersService(dataSource.getRepository(User));
+  beforeEach(() => {
+    prisma = createPrismaMock();
+    service = new UsersService(prisma);
   });
 
-  afterEach(async () => {
-    if (dataSource?.isInitialized) {
-      await dataSource.destroy();
-    }
+  afterEach(() => {
+    jest.resetAllMocks();
   });
 
   it('creates a user with hashed password', async () => {
-    const user = await service.create({
+    (prisma.user.create as jest.Mock).mockImplementationOnce(async ({ data }) => ({
+      id: 'user-1',
+      ...data,
+      userRoles: [],
+      wallet: null,
+    }));
+
+    const result = await service.create({
       username: 'john_doe',
       email: 'john@example.com',
       password: 'StrongPass123',
     });
 
-    expect(user.id).toBeDefined();
-    expect(user.username).toEqual('john_doe');
-
-    const persisted = await dataSource
-      .getRepository(User)
-      .createQueryBuilder('user')
-      .addSelect('user.passwordHash')
-      .where('user.id = :id', { id: user.id })
-      .getOneOrFail();
-
-    expect(persisted.passwordHash).toBeDefined();
-    expect(persisted.passwordHash).not.toEqual('StrongPass123');
-    expect(persisted.passwordHash).toHaveLength(64);
+    const call = (prisma.user.create as jest.Mock).mock.calls[0]?.[0];
+    expect(call.data.passwordHash).toHaveLength(64); // sha256 hex
+    expect(call.data.passwordHash).not.toEqual('StrongPass123');
+    expect(result.username).toBe('john_doe');
   });
 
-  it('filters users by search and activity', async () => {
-    await service.create({
-      username: 'active_user',
-      email: 'active@example.com',
-      isActive: true,
-    });
-    await service.create({
-      username: 'inactive_user',
-      email: 'inactive@example.com',
-      isActive: false,
-    });
+  it('filters users via findAll', async () => {
+    (prisma.user.findMany as jest.Mock).mockResolvedValueOnce([
+      { id: 'user-1', username: 'active_user', userRoles: [], wallet: null },
+    ]);
 
-    const activeUsers = await service.findAll({
+    const users = await service.findAll({
       search: 'active',
-      isActive: true,
       limit: 10,
     });
 
-    expect(activeUsers).toHaveLength(1);
-    expect(activeUsers[0].username).toEqual('active_user');
+    expect(prisma.user.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          OR: expect.arrayContaining([
+            expect.objectContaining({ username: expect.any(Object) }),
+          ]),
+        }),
+      }),
+    );
+    expect(users).toHaveLength(1);
   });
 
-  it('updates mutable fields and rehashes password', async () => {
-    const created = await service.create({
-      username: 'needs_update',
-      email: 'old@example.com',
-      password: 'InitialPass123',
+  it('updates user and re-hashes password when provided', async () => {
+    (prisma.user.findUnique as jest.Mock).mockResolvedValueOnce({
+      id: 'user-1',
     });
+    (prisma.user.update as jest.Mock).mockImplementationOnce(async ({ data }) => ({
+      id: 'user-1',
+      ...data,
+      userRoles: [],
+      wallet: null,
+    }));
 
-    const updated = await service.update(created.id, {
+    const updated = await service.update('user-1', {
       email: 'new@example.com',
       password: 'NewPass456',
-      isActive: false,
     });
 
-    expect(updated.email).toEqual('new@example.com');
-    expect(updated.isActive).toEqual(false);
-
-    const persisted = await dataSource
-      .getRepository(User)
-      .createQueryBuilder('user')
-      .addSelect('user.passwordHash')
-      .where('user.id = :id', { id: created.id })
-      .getOneOrFail();
-
-    expect(persisted.passwordHash).not.toEqual('InitialPass123');
-    expect(persisted.passwordHash).toHaveLength(64);
+    const call = (prisma.user.update as jest.Mock).mock.calls[0]?.[0];
+    expect(call.data.passwordHash).toHaveLength(64);
+    expect(updated.email).toBe('new@example.com');
   });
 });

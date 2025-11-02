@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   ForbiddenException,
   Injectable,
   NotFoundException,
@@ -6,10 +7,8 @@ import {
   HttpStatus,
   UnauthorizedException,
 } from '@nestjs/common';
-import { InjectRepository } from '@nestjs/typeorm';
-import { MoreThanOrEqual, Repository } from 'typeorm';
-import { Product, PricingType } from '../entities/content/product.entity';
-import { ProductDownload } from '../entities/analytics/product-download.entity';
+import { PricingType } from '@app/prisma/prisma.constants';
+import { PrismaService } from '@app/prisma/prisma.service';
 import { CountersService } from '../counters/counters.service';
 import { StorageService } from '../storage/storage.service';
 
@@ -27,10 +26,7 @@ export interface DownloadResult {
 @Injectable()
 export class DownloadsService {
   constructor(
-    @InjectRepository(Product)
-    private readonly productsRepository: Repository<Product>,
-    @InjectRepository(ProductDownload)
-    private readonly productDownloadsRepository: Repository<ProductDownload>,
+    private readonly prisma: PrismaService,
     private readonly countersService: CountersService,
     private readonly storageService: StorageService,
   ) {}
@@ -38,10 +34,10 @@ export class DownloadsService {
   async enforceDailyCap(userId: string): Promise<void> {
     const windowStart = new Date(Date.now() - TWENTY_FOUR_HOURS);
 
-    const downloadCount = await this.productDownloadsRepository.count({
+    const downloadCount = await this.prisma.productDownload.count({
       where: {
         userId,
-        createdAt: MoreThanOrEqual(windowStart),
+        createdAt: { gte: windowStart },
       },
     });
 
@@ -58,16 +54,31 @@ export class DownloadsService {
     userId?: string,
   ): Promise<DownloadResult> {
     if (!userId) {
-      throw new UnauthorizedException('Authentication is required to download this product');
+      throw new UnauthorizedException(
+        'Authentication is required to download this product',
+      );
     }
 
-    const product = await this.productsRepository
-      .createQueryBuilder('product')
-      .leftJoinAndSelect('product.file', 'file')
-      .where('product.id = :productId', { productId })
-      .select(['product.id', 'product.pricingType', 'product.downloadsCount', 'file.id', 'file.originalName', 'file.size', 'file.mimeType', 'file.createdAt'])
-      .addSelect('file.storageKey')
-      .getOne();
+    const numericId = this.ensureNumericId(productId);
+
+    const product = await this.prisma.product.findUnique({
+      where: { id: numericId },
+      select: {
+        id: true,
+        pricingType: true,
+        downloadsCount: true,
+        file: {
+          select: {
+            id: true,
+            storageKey: true,
+            originalName: true,
+            size: true,
+            mimeType: true,
+            createdAt: true,
+          },
+        },
+      },
+    });
 
     if (!product || !product.file) {
       throw new NotFoundException('Product file not found');
@@ -79,19 +90,23 @@ export class DownloadsService {
       userId,
     );
 
-    await this.productDownloadsRepository.insert({
-      productId,
-      userId,
+    await this.prisma.productDownload.create({
+      data: {
+        productId: numericId,
+        userId,
+      },
     });
 
     await this.countersService.incrementDownloads(productId);
 
-    const refreshed = await this.productsRepository.findOne({
-      where: { id: productId },
-      select: ['id', 'downloadsCount'],
+    const refreshed = await this.prisma.product.findUnique({
+      where: { id: numericId },
+      select: { downloadsCount: true },
     });
 
-    const stream = this.storageService.getDownloadStream(product.file.storageKey);
+    const stream = this.storageService.getDownloadStream(
+      product.file.storageKey,
+    );
     const downloadsCount =
       refreshed?.downloadsCount ?? product.downloadsCount + 1;
 
@@ -100,15 +115,12 @@ export class DownloadsService {
       filename: product.file.originalName ?? null,
       mimeType: product.file.mimeType ?? null,
       size: product.file.size ? Number(product.file.size) : undefined,
-      downloadsCount:
-        typeof downloadsCount === 'number'
-          ? downloadsCount
-          : Number.parseInt(String(downloadsCount), 10),
+      downloadsCount,
     };
   }
 
   private async checkPricingRequirements(
-    product: Pick<Product, 'id' | 'pricingType'>,
+    product: { id: bigint; pricingType: PricingType },
     userId: string,
   ): Promise<void> {
     switch (product.pricingType) {
@@ -138,22 +150,22 @@ export class DownloadsService {
 
   private async checkPaidOwnership(
     userId: string,
-    productId: string,
+    productId: bigint,
   ): Promise<boolean> {
-    // TODO: Integrate with purchase/billing service to confirm ownership.
     void userId;
     void productId;
     return true;
   }
 
   private async checkActiveSubscription(userId: string): Promise<boolean> {
-    // TODO: Integrate with subscription service to confirm entitlements.
     void userId;
     return true;
   }
+
+  private ensureNumericId(productId: string): bigint {
+    if (!/^\d+$/.test(productId)) {
+      throw new BadRequestException('Product id must be numeric');
+    }
+    return BigInt(productId);
+  }
 }
-
-
-
-
-

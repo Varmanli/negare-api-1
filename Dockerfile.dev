@@ -1,9 +1,32 @@
 FROM node:22-alpine
+
+ARG HTTP_PROXY
+ARG HTTPS_PROXY
+ARG NO_PROXY
+ARG NPM_CONFIG_REGISTRY=https://registry.npmjs.org/
+
+ENV HTTP_PROXY=${HTTP_PROXY} \
+    HTTPS_PROXY=${HTTPS_PROXY} \
+    NO_PROXY=${NO_PROXY} \
+    NODE_ENV=development \
+    TZ=Europe/Stockholm \
+    CHOKIDAR_USEPOLLING=true \
+    NPM_CONFIG_REGISTRY=${NPM_CONFIG_REGISTRY} \
+    NPM_CONFIG_FETCH_RETRIES=5 \
+    NPM_CONFIG_FETCH_RETRY_MINTIMEOUT=20000 \
+    NPM_CONFIG_FETCH_RETRY_MAXTIMEOUT=120000 \
+    NPM_CONFIG_PROGRESS=false \
+    NPM_CONFIG_AUDIT=false
+
 WORKDIR /app
+
+RUN apk add --no-cache openssl
+
 COPY package*.json ./
-RUN npm ci
-COPY . .
-ENV CHOKIDAR_USEPOLLING=true
-ENV WATCHPACK_POLLING=true
-EXPOSE 3000 9229
-CMD ["npm","run","start:dev"]
+COPY prisma ./prisma
+RUN npm ci --no-audit
+RUN npx prisma generate --schema prisma/schema.prisma
+
+EXPOSE 4000 9229
+
+CMD ["sh","-c","npm run prisma:generate && npm run start:dev"]

@@ -1,34 +1,29 @@
-/**
- * AuthModule wires authentication services, guards, and controllers together,
- * exporting utilities that other Core modules may re-use (e.g., guards).
- */
 import { Module } from '@nestjs/common';
 import { APP_GUARD } from '@nestjs/core';
-import { TypeOrmModule } from '@nestjs/typeorm';
 import { HybridAuthGuard } from './guards/hybrid-auth.guard';
 import { JwtAuthGuard } from './guards/jwt-auth.guard';
 import { RolesGuard } from '@app/common/guards/roles.guard';
-import { OtpCode } from './entities/otp-code.entity';
-import { OtpService } from './otp.service';
 import { SmsModule } from '@app/sms/sms.module';
-import { AuthController } from './auth.controller';
 import { MailModule } from '@app/mail/mail.module';
-import { PasswordService } from './password.service';
-import { User } from '@app/core/users/user.entity';
 import { RedisModule } from '@app/redis/redis.module';
-import { OtpRateLimitService } from './otp-rate-limit.service';
-import { RefreshService } from './refresh.service';
 import { UsersModule } from '@app/core/users/users.module';
+import { TokenModule } from './token/token.module';
+
+// Controllers
+import { AuthController } from './auth.controller';
+import { OtpController } from './otp/otp.controller';
+import { PasswordController } from './password/password.controller';
+
+// Services
+import { OtpService } from './otp/otp.service';
+import { OtpRateLimitService } from './otp/otp-rate-limit.service';
+import { PasswordService } from './password/password.service';
+import { RefreshService } from './refresh.service';
+import { SessionService } from './session/session.service';
 
 @Module({
-  imports: [
-    TypeOrmModule.forFeature([OtpCode, User]),
-    SmsModule,
-    MailModule,
-    RedisModule,
-    UsersModule,
-  ],
-  controllers: [AuthController],
+  imports: [SmsModule, MailModule, RedisModule, UsersModule, TokenModule],
+  controllers: [AuthController, OtpController, PasswordController],
   providers: [
     OtpService,
     PasswordService,
@@ -36,6 +31,13 @@ import { UsersModule } from '@app/core/users/users.module';
     OtpRateLimitService,
     HybridAuthGuard,
     JwtAuthGuard,
+    SessionService,
+    { provide: 'LEGACY_PASSWORD_ADAPTER', useValue: null },
+
+    {
+      provide: 'AuditService',
+      useValue: { log: async () => void 0 },
+    },
     {
       provide: APP_GUARD,
       useClass: HybridAuthGuard,
@@ -45,9 +47,12 @@ import { UsersModule } from '@app/core/users/users.module';
       useClass: RolesGuard,
     },
   ],
-  exports: [OtpService, PasswordService, RefreshService, JwtAuthGuard],
+  exports: [
+    OtpService,
+    PasswordService,
+    RefreshService,
+    JwtAuthGuard,
+    SessionService,
+  ],
 })
-/**
- * Nest module that bundles controllers, providers, and guards for authentication flows.
- */
 export class AuthModule {}

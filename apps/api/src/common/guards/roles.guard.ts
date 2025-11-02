@@ -1,4 +1,4 @@
-﻿/**
+/**
  * RolesGuard enforces RBAC metadata by comparing required role names with the user payload.
  */
 import {
@@ -9,7 +9,7 @@ import {
 } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
 import { Request } from 'express';
-import { RoleName } from '@app/core/roles/entities/role.entity';
+import { RoleName } from '@app/prisma/prisma.constants';
 import { CurrentUserPayload } from '../decorators/current-user.decorator';
 import { ROLES_KEY } from '../decorators/roles.decorator';
 
@@ -41,7 +41,7 @@ export class RolesGuard implements CanActivate {
     const user = request.user;
 
     if (!user) {
-      throw new ForbiddenException('دسترسی مجاز نیست.');
+      throw new ForbiddenException('دسترسی برای کاربر ناشناس مجاز نیست.');
     }
 
     const hasRole = user.roles?.some((role) =>
@@ -49,7 +49,7 @@ export class RolesGuard implements CanActivate {
     );
 
     if (!hasRole) {
-      throw new ForbiddenException('نقش کاربر برای دسترسی کافی نیست.');
+      throw new ForbiddenException('دسترسی به این منبع مجاز نیست.');
     }
 
     return true;

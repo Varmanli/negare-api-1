@@ -38,22 +38,22 @@ import { ProductsService } from './products.service';
 import { ListProductsQueryDto } from './dtos/list-products-query.dto';
 import { CreateProductDto } from './dtos/create-product.dto';
 import { UpdateProductDto } from './dtos/update-product.dto';
-import { Product } from '../entities/content/product.entity';
 import { ProductListResponseDto } from './dtos/product-list-response.dto';
 import { ProductDetailResponseDto } from './dtos/product-detail-response.dto';
 import { ProductFileResponseDto } from './dtos/product-file-response.dto';
+import { ProductResponseDto } from './dtos/product-response.dto';
 import { CurrentUser, CurrentUserPayload } from '@app/common/decorators/current-user.decorator';
 import { JwtAuthGuard } from '@app/core/auth/guards/jwt-auth.guard';
 import { RolesGuard } from '@app/common/guards/roles.guard';
 import { Roles } from '@app/common/decorators/roles.decorator';
-import { RoleName } from '@app/core/roles/entities/role.entity';
+import { RoleName } from '@app/prisma/prisma.constants';
 import { SupplierOwnershipGuard } from '../guards/supplier-ownership.guard';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { memoryStorage } from 'multer';
 import { UploadedFile as StoredUploadedFile } from '../storage/storage.service';
 
 @ApiTags('Catalog Products')
-@ApiExtraModels(ProductDetailResponseDto, ProductFileResponseDto)
+@ApiExtraModels(ProductResponseDto, ProductDetailResponseDto, ProductFileResponseDto)
 @Controller('catalog/products')
 export class ProductsController {
   constructor(private readonly productsService: ProductsService) {}
@@ -91,7 +91,7 @@ export class ProductsController {
     description: 'Requested product with relations and user engagement flags.',
     schema: {
       allOf: [
-        { $ref: getSchemaPath(Product) },
+        { $ref: getSchemaPath(ProductResponseDto) },
         { $ref: getSchemaPath(ProductDetailResponseDto) },
       ],
     },
@@ -103,12 +103,15 @@ export class ProductsController {
     @CurrentUser() currentUser?: CurrentUserPayload,
   ): Promise<ProductDetailResponseDto> {
     const product = await this.productsService.findByIdOrSlug(idOrSlug);
-    await this.productsService.recordView(product, {
+    await this.productsService.recordView(product.id, {
       currentUser,
       ip: request.ip,
       userAgent: request.get('user-agent') ?? undefined,
     });
-    return this.productsService.decorateProductWithUserState(product, currentUser);
+    return this.productsService.decorateProductWithUserState(
+      product,
+      currentUser,
+    );
   }
 
   @Post()
@@ -123,12 +126,12 @@ export class ProductsController {
   })
   @ApiCreatedResponse({
     description: 'Product successfully created.',
-    type: Product,
+    type: ProductDetailResponseDto,
   })
   async createProduct(
     @Body() dto: CreateProductDto,
     @CurrentUser() currentUser: CurrentUserPayload,
-  ): Promise<Product> {
+  ): Promise<ProductDetailResponseDto> {
     return this.productsService.createProduct(dto, currentUser);
   }
 
@@ -144,12 +147,12 @@ export class ProductsController {
   })
   @ApiOkResponse({
     description: 'Product successfully updated.',
-    type: Product,
+    type: ProductDetailResponseDto,
   })
   async updateProduct(
     @Param('id') id: string,
     @Body() dto: UpdateProductDto,
-  ): Promise<Product> {
+  ): Promise<ProductDetailResponseDto> {
     return this.productsService.updateProduct(id, dto);
   }
 

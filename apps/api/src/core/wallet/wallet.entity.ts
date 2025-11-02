@@ -1,7 +1,7 @@
 import { Column, Entity, JoinColumn, OneToMany, OneToOne } from 'typeorm';
 import { BaseEntity } from '@app/shared/base.entity';
 import { User } from '@app/core/users/user.entity';
-import { WalletTransaction } from '../wallet-transactions/wallet-transaction.entity';
+import { WalletTransaction } from './wallet-transaction.entity';
 
 export enum WalletCurrency {
   IRR = 'IRR',

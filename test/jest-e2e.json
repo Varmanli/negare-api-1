@@ -1,9 +1,20 @@
 {
-  "moduleFileExtensions": ["js", "json", "ts"],
-  "rootDir": "../apps/api/src/tests/e2e",
+  "moduleFileExtensions": ["ts", "tsx", "js", "json"],
+  "roots": [
+    "<rootDir>/apps/api/src",
+    "<rootDir>/apps/api/test",
+    "<rootDir>/apps/api/src/tests"
+  ],
+  "rootDir": "..",
   "testEnvironment": "node",
-  "testRegex": ".*\\.e2e-spec\\.ts$",
+  "testRegex": "apps/api/test/.*\\.e2e-spec\\.ts$",
   "transform": {
-    "^.+\\.(t|j)s$": "ts-jest"
-  }
+    "^.+\\.(t|j)s$": ["ts-jest", { "tsconfig": "tsconfig.spec.json" }]
+  },
+  "moduleNameMapper": {
+    "^@app/(.*)$": "<rootDir>/apps/api/src/$1",
+    "^@test/(.*)$": "<rootDir>/apps/api/test/$1",
+    "^@/(.*)$": "<rootDir>/$1"
+  },
+  "setupFiles": ["<rootDir>/test/setup-env.ts"]
 }

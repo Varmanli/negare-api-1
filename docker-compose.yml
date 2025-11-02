@@ -1,24 +1,27 @@
-version: '3.9'
-
 services:
   api:
     build:
       context: .
       dockerfile: Dockerfile.dev
+      args:
+        HTTP_PROXY: ${HTTP_PROXY:-}
+        HTTPS_PROXY: ${HTTPS_PROXY:-}
+        NO_PROXY: ${NO_PROXY:-}
+        NPM_CONFIG_REGISTRY: ${NPM_CONFIG_REGISTRY:-https://registry.npmjs.org/}
     working_dir: /app
-
-    # .env باید کنار همین فایل compose باشد
     env_file:
-      - ./.env
-
+      - .env
     environment:
-      # --- Dev & Hot Reload ---
       NODE_ENV: development
+      PORT: ${PORT:-4000}
       CHOKIDAR_USEPOLLING: 'true'
-      CHOKIDAR_INTERVAL: '1000'
-
-      # --- App Config ---
-      DATABASE_URL: ${DATABASE_URL:-postgresql://postgres:postgres@db:5432/negare}
+      DATABASE_URL: ${DATABASE_URL:-postgresql://postgres:postgres@db:5432/negare_db}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379}
+      CORS_ORIGIN: ${CORS_ORIGIN:-http://localhost:3000}
+      SET_PWD_JWT_SECRET: ${SET_PWD_JWT_SECRET:-changeme}
+      SET_PWD_JWT_EXPIRES: ${SET_PWD_JWT_EXPIRES:-15m}
+      ACCESS_JWT_SECRET: ${ACCESS_JWT_SECRET:-changeme}
+      ACCESS_JWT_EXPIRES: ${ACCESS_JWT_EXPIRES:-10m}
       KAVENEGAR_API_KEY: ${KAVENEGAR_API_KEY:-}
       KAVENEGAR_TEMPLATE: ${KAVENEGAR_TEMPLATE:-send-code}
       OTP_TTL_SECONDS: ${OTP_TTL_SECONDS:-300}
@@ -26,81 +29,97 @@ services:
       SMTP_PORT: ${SMTP_PORT:-587}
       SMTP_USER: ${SMTP_USER:-}
       SMTP_PASS: ${SMTP_PASS:-}
-      MAIL_FROM: ${MAIL_FROM:-Negare <no-reply@negare.test>}
-      SET_PWD_JWT_SECRET: ${SET_PWD_JWT_SECRET:-changeme}
-      SET_PWD_JWT_EXPIRES: ${SET_PWD_JWT_EXPIRES:-15m}
-      ACCESS_JWT_SECRET: ${ACCESS_JWT_SECRET:-changeme}
-      ACCESS_JWT_EXPIRES: ${ACCESS_JWT_EXPIRES:-30m}
-      OTP_REQUEST_WINDOW: ${OTP_REQUEST_WINDOW:-60}
-      OTP_REQUEST_MAX: ${OTP_REQUEST_MAX:-5}
-      OTP_VERIFY_WINDOW: ${OTP_VERIFY_WINDOW:-300}
-      OTP_VERIFY_MAX: ${OTP_VERIFY_MAX:-5}
-      REDIS_HOST: ${REDIS_HOST:-redis}
-      REDIS_PORT: ${REDIS_PORT:-6379}
-      CORS_ORIGIN: http://localhost:3000
-
-      # --- Proxy hygiene (اختیاری) ---
-      HTTP_PROXY:
-      HTTPS_PROXY:
-      ALL_PROXY:
-      NO_PROXY: api.kavenegar.com,.kavenegar.com,localhost,127.0.0.1
-
-    # DNS سفارشی اختیاری
+      MAIL_FROM: '${MAIL_FROM:-Negare <no-reply@negare.test>}'
+      # اگر دیباگ نمی‌خوای، این خط رو حذف کن تا ارور 9229 هم نداشته باشی:
+      # NODE_OPTIONS: ${NODE_OPTIONS:---inspect=0.0.0.0:9229}
     dns:
       - 1.1.1.1
       - 8.8.8.8
-
     ports:
-      - '4000:3000' # Nest داخل کانتینر روی 3000 → میزبان 4000
-      - '9229:9229' # Node inspect برای دیباگ
-
+      - '4000:4000'
+      # اگر دیباگ می‌خوای، این رو هم باز کن و env بالا رو فعال بذار:
+      # - '9229:9229'
     volumes:
-      - .:/app # کد شما
-      - /app/node_modules # جلوگیری از overwrite شدن node_modules داخل کانتینر
-
+      - .:/app
+      - /app/node_modules
+      - /app/dist
     depends_on:
       db:
         condition: service_healthy
       redis:
         condition: service_healthy
-
-    # اجرای درست nodemon (بدون اجرا با node)
     command: >
-      sh -lc "npx nodemon
-      --inspect=0.0.0.0:9229
-      --watch src
-      --ext ts,js,json
-      --exec 'nest start --watch'"
-
+      sh -c "npm run prisma:generate && npm run start:dev"
     restart: unless-stopped
     tty: true
     stdin_open: true
+    develop:
+      watch:
+        - action: sync
+          path: ./apps/api/src
+          target: /app/apps/api/src
+          ignore:
+            - node_modules/
+            - dist/
+        - action: sync
+          path: ./prisma
+          target: /app/prisma
+        - action: sync+restart
+          path: package.json
+          target: /app/package.json
 
   db:
     image: postgres:16-alpine
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
-      POSTGRES_DB: negare
+      POSTGRES_DB: negare_db
     ports:
-      - '5433:5432'
+      - '5432:5432'
     volumes:
-      - pgdata:/var/lib/postgresql/data
+      - db-data:/var/lib/postgresql/data
+      - ./docker/db-init:/docker-entrypoint-initdb.d:ro
     healthcheck:
-      test: ['CMD-SHELL', 'pg_isready -U postgres -d negare']
+      test: ['CMD-SHELL', 'pg_isready -U postgres -d negare_db']
       interval: 5s
       timeout: 3s
-      retries: 12
+      retries: 20
     restart: unless-stopped
 
   redis:
     image: redis:7-alpine
+    command: ['redis-server', '--save', '', '--appendonly', 'no']
     healthcheck:
       test: ['CMD', 'redis-cli', 'ping']
       interval: 5s
-      timeout: 3s
-      retries: 12
+      timeout: 5s
+      retries: 20
     restart: unless-stopped
 
+  # Prisma Studio (اختیاری، با profile)
+  studio:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    working_dir: /app
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgresql://postgres:postgres@db:5432/negare_db}
+    ports:
+      - '5555:5555'
+    volumes:
+      - .:/app
+      - /app/node_modules
+    depends_on:
+      db:
+        condition: service_healthy
+    command: >
+      sh -c "npm run prisma:generate &&
+             npx prisma studio --schema prisma/schema.prisma --hostname 0.0.0.0 --port 5555"
+    restart: unless-stopped
+    profiles:
+      - studio
+
 volumes:
-  pgdata:
+  db-data:

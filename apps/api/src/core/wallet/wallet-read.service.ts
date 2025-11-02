@@ -1,20 +1,18 @@
-import {
-  Injectable,
-  Logger,
-  UnauthorizedException,
-} from '@nestjs/common';
+import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import type { Prisma } from '@prisma/client';
+import { PrismaService } from '@app/prisma/prisma.service';
 import { WalletsService } from './wallets.service';
-import { Wallet } from './wallet.entity';
-import {
-  WalletTransaction,
-  WalletTransactionStatus,
-  WalletTransactionType,
-} from '../wallet-transactions/wallet-transaction.entity';
 import { WalletTransactionsQueryDto } from './dto/wallet-transactions-query.dto';
 import { normalizeDecimalString } from './utils/amount.util';
+
+// Literal unions به‌جای import کردن enum از کلاینت
+type TxType = 'credit' | 'debit';
+type TxStatusDb = 'pending' | 'completed' | 'failed';
+
+type WalletModel = Prisma.WalletGetPayload<{}>;
+type WalletTxModel = Prisma.WalletTransactionGetPayload<{}>;
+type WhereType = Prisma.WalletTransactionFindManyArgs['where'];
 
 export interface WalletTransactionItem {
   id: string;
@@ -39,24 +37,17 @@ export class WalletReadService {
   constructor(
     private readonly config: ConfigService,
     private readonly walletsService: WalletsService,
-    @InjectRepository(Wallet)
-    private readonly walletsRepository: Repository<Wallet>,
-    @InjectRepository(WalletTransaction)
-    private readonly walletTransactionsRepository: Repository<WalletTransaction>,
+    private readonly prisma: PrismaService,
   ) {}
 
   async seedIfNeeded(userId: string): Promise<void> {
-    if (!this.shouldSeed()) {
-      return;
-    }
+    if (!this.shouldSeed()) return;
 
     const wallet = await this.ensureWallet(userId);
-    const transactionCount = await this.walletTransactionsRepository.count({
+    const transactionCount = await this.prisma.walletTransaction.count({
       where: { walletId: wallet.id },
     });
-    if (transactionCount > 0) {
-      return;
-    }
+    if (transactionCount > 0) return;
 
     const creditKey = this.seedKey(userId, 'credit');
     const debitKey = this.seedKey(userId, 'debit');
@@ -76,11 +67,13 @@ export class WalletReadService {
     });
   }
 
-  async getBalance(userId: string): Promise<{ currency: string; balance: string }> {
+  async getBalance(
+    userId: string,
+  ): Promise<{ currency: string; balance: string }> {
     const wallet = await this.ensureWallet(userId);
     return {
-      currency: wallet.currency,
-      balance: normalizeDecimalString(wallet.balance ?? '0'),
+      currency: String(wallet.currency),
+      balance: normalizeDecimalString(wallet.balance.toString()),
     };
   }
 
@@ -91,85 +84,111 @@ export class WalletReadService {
     const wallet = await this.ensureWallet(userId);
     const limit = Math.min(Math.max(query.limit ?? 20, 1), 50);
 
-    const qb = this.walletTransactionsRepository
-      .createQueryBuilder('tx')
-      .where('tx.walletId = :walletId', { walletId: wallet.id })
-      .orderBy('tx.createdAt', 'DESC')
-      .addOrderBy('tx.id', 'DESC')
-      .take(limit);
+    // where را به‌صورت generic از روی FindManyArgs تایپ می‌کنیم
+    let where: WhereType = { walletId: wallet.id };
 
     if (query.type && query.type !== 'all') {
-      qb.andWhere('tx.type = :type', {
-        type:
-          query.type === 'credit'
-            ? WalletTransactionType.CREDIT
-            : WalletTransactionType.DEBIT,
-      });
+      // cast ایمن بدون any (unknown → نوع دقیق)
+      where = {
+        ...where,
+        type: (query.type === 'credit'
+          ? 'credit'
+          : 'debit') as unknown as WhereType extends { type?: infer T }
+          ? T
+          : never,
+      };
     }
 
     if (query.fromDate) {
-      qb.andWhere('tx.createdAt >= :fromDate', { fromDate: query.fromDate });
-    }
-
-    if (query.toDate) {
-      qb.andWhere('tx.createdAt <= :toDate', { toDate: query.toDate });
-    }
-
-    if (query.cursor) {
-      const cursor = this.parseCursor(query.cursor);
-      if (cursor) {
-        qb.andWhere(
-          '(tx.createdAt < :cursorDate OR (tx.createdAt = :cursorDate AND tx.id < :cursorId))',
-          {
-            cursorDate: cursor.createdAt,
-            cursorId: cursor.id,
-          },
-        );
+      const fromDate = new Date(query.fromDate);
+      if (!Number.isNaN(fromDate.getTime())) {
+        where = {
+          ...where,
+          createdAt: {
+            ...((where?.createdAt as object) ?? {}),
+            gte: fromDate,
+          } as unknown as WhereType extends { createdAt?: infer T } ? T : never,
+        };
       }
     }
 
-    const transactions = await qb.getMany();
+    if (query.toDate) {
+      const toDate = new Date(query.toDate);
+      if (!Number.isNaN(toDate.getTime())) {
+        where = {
+          ...where,
+          createdAt: {
+            ...((where?.createdAt as object) ?? {}),
+            lte: toDate,
+          } as unknown as WhereType extends { createdAt?: infer T } ? T : never,
+        };
+      }
+    }
+
+    const extraConds: WhereType[] = [];
+    if (query.cursor) {
+      const cursor = this.parseCursor(query.cursor);
+      if (cursor) {
+        extraConds.push({
+          OR: [
+            { createdAt: { lt: cursor.createdAt } },
+            { createdAt: cursor.createdAt, id: { lt: cursor.id } },
+          ],
+        } as WhereType);
+      }
+    }
+
+    const finalWhere: WhereType =
+      extraConds.length > 0
+        ? ({ AND: [where, ...extraConds] } as WhereType)
+        : where;
+
+    const transactions = await this.prisma.walletTransaction.findMany({
+      where: finalWhere,
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+      take: limit,
+    });
+
     const items: WalletTransactionItem[] = transactions.map((tx) => ({
       id: tx.id,
-      type: tx.type,
-      status: this.mapStatus(tx.status),
-      amount: normalizeDecimalString(tx.amount),
+      type: tx.type as TxType,
+      status: this.mapStatus(tx.status as TxStatusDb),
+      amount: normalizeDecimalString(tx.amount.toString()),
       createdAt: tx.createdAt.toISOString(),
       balanceAfter: normalizeDecimalString(
-        tx.balanceAfter ?? wallet.balance ?? '0',
+        (tx.balanceAfter ?? wallet.balance).toString(),
       ),
-      meta: tx.metadata ?? null,
+      meta: (tx.metadata as Record<string, unknown> | null) ?? null,
     }));
 
     const last = transactions.at(-1);
     const nextCursor =
-      last && transactions.length === limit
-        ? this.buildCursor(last)
-        : null;
+      last && transactions.length === limit ? this.buildCursor(last) : null;
 
     return { items, nextCursor };
   }
 
-  private async ensureWallet(userId: string): Promise<Wallet> {
-    let wallet = await this.walletsRepository.findOne({ where: { userId } });
-    if (!wallet) {
-      this.logger.debug(`Creating wallet for user ${userId}`);
-      wallet = await this.walletsRepository.save(
-        this.walletsRepository.create({
-          userId,
-          balance: '0',
-        }),
+  private async ensureWallet(userId: string): Promise<WalletModel> {
+    const existing = await this.prisma.wallet.findUnique({ where: { userId } });
+    if (existing) return existing;
+
+    try {
+      return await this.prisma.wallet.create({ data: { userId } });
+    } catch (error) {
+      this.logger.debug(
+        `Wallet creation race detected for user ${userId}: ${String(error)}`,
       );
+      const wallet = await this.prisma.wallet.findUnique({ where: { userId } });
+      if (!wallet) throw new NotFoundException('کیف پول پیدا نشد');
+      return wallet;
     }
-    return wallet;
   }
 
   private shouldSeed(): boolean {
     const explicit =
       this.config.get<string>('WALLET_SEED') ?? process.env.WALLET_SEED;
-    if (explicit) {
+    if (explicit)
       return ['1', 'true', 'yes', 'on'].includes(explicit.toLowerCase());
-    }
     const env =
       this.config.get<string>('NODE_ENV') ??
       process.env.NODE_ENV ??
@@ -181,40 +200,26 @@ export class WalletReadService {
     return `${WalletReadService.SEED_FLAG}-${suffix}-${userId}`;
   }
 
-  private mapStatus(
-    status: WalletTransactionStatus,
-  ): 'pending' | 'success' | 'failed' {
+  private mapStatus(status: TxStatusDb): 'pending' | 'success' | 'failed' {
     switch (status) {
-      case WalletTransactionStatus.COMPLETED:
+      case 'completed':
         return 'success';
-      case WalletTransactionStatus.PENDING:
+      case 'pending':
         return 'pending';
-      case WalletTransactionStatus.FAILED:
       default:
         return 'failed';
     }
   }
 
-  private parseCursor(
-    cursor: string,
-  ):
-    | {
-        createdAt: Date;
-        id: string;
-      }
-    | null {
+  private parseCursor(cursor: string): { createdAt: Date; id: string } | null {
     const [datePart, idPart] = cursor.split('|');
-    if (!datePart || !idPart) {
-      return null;
-    }
+    if (!datePart || !idPart) return null;
     const date = new Date(datePart);
-    if (Number.isNaN(date.getTime())) {
-      return null;
-    }
+    if (Number.isNaN(date.getTime())) return null;
     return { createdAt: date, id: idPart };
   }
 
-  private buildCursor(tx: WalletTransaction): string {
+  private buildCursor(tx: WalletTxModel): string {
     return `${tx.createdAt.toISOString()}|${tx.id}`;
   }
 }

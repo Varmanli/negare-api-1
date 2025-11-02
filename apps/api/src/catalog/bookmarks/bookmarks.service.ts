@@ -3,48 +3,60 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { InjectRepository } from '@nestjs/typeorm';
+import type { Prisma as PrismaNamespace } from '@prisma/client';
+import { Prisma, PrismaClientKnownRequestError } from '@app/prisma/prisma.constants';
+import { PrismaService } from '@app/prisma/prisma.service';
 import {
-  QueryFailedError,
-  Repository,
-  SelectQueryBuilder,
-} from 'typeorm';
-import { Bookmark } from '../entities/content/bookmark.entity';
-import { Product } from '../entities/content/product.entity';
+  mapProduct,
+  productWithRelations,
+  ProductWithRelations,
+} from '../products/product.mapper';
 import { ListQueryDto } from '../dtos/list-query.dto';
-import { paginate, PaginationResult } from '../utils/pagination.util';
+import {
+  PaginationResult,
+  clampPagination,
+  toPaginationResult,
+} from '../utils/pagination.util';
+import { ProductResponseDto } from '../products/dtos/product-response.dto';
 
 export interface ToggleBookmarkResult {
   bookmarked: boolean;
 }
 
+const bookmarkInclude = Prisma.validator<PrismaNamespace.BookmarkInclude>()({
+  product: productWithRelations,
+});
+
+type BookmarkWithProduct = PrismaNamespace.BookmarkGetPayload<{
+  include: typeof bookmarkInclude;
+}>;
+
 @Injectable()
 export class BookmarksService {
-  constructor(
-    @InjectRepository(Bookmark)
-    private readonly bookmarksRepository: Repository<Bookmark>,
-    @InjectRepository(Product)
-    private readonly productsRepository: Repository<Product>,
-  ) {}
+  constructor(private readonly prisma: PrismaService) {}
 
   async toggleBookmark(
     userId: string,
     productId: string,
     desiredState?: boolean,
   ): Promise<ToggleBookmarkResult> {
-    this.ensureNumericId(productId);
+    const numericId = this.ensureNumericId(productId);
 
-    const product = await this.productsRepository.findOne({
-      where: { id: productId },
-      select: ['id'],
+    const product = await this.prisma.product.findUnique({
+      where: { id: numericId },
+      select: { id: true },
     });
 
     if (!product) {
       throw new NotFoundException('Product not found');
     }
 
-    const existing = await this.bookmarksRepository.findOne({
-      where: { userId, productId },
+    const bookmarkWhere: PrismaNamespace.BookmarkWhereUniqueInput = {
+      userId_productId: { userId, productId: numericId },
+    };
+
+    const existing = await this.prisma.bookmark.findUnique({
+      where: bookmarkWhere,
     });
 
     let bookmarked: boolean;
@@ -52,19 +64,19 @@ export class BookmarksService {
     if (desiredState === undefined) {
       bookmarked = !existing;
       if (existing) {
-        await this.bookmarksRepository.delete({ userId, productId });
+        await this.prisma.bookmark.delete({ where: bookmarkWhere });
       } else {
-        await this.insertBookmark(userId, productId);
+        await this.createBookmark(userId, numericId);
       }
     } else if (desiredState) {
       bookmarked = true;
       if (!existing) {
-        await this.insertBookmark(userId, productId);
+        await this.createBookmark(userId, numericId);
       }
     } else {
       bookmarked = false;
       if (existing) {
-        await this.bookmarksRepository.delete({ userId, productId });
+        await this.prisma.bookmark.delete({ where: bookmarkWhere });
       }
     }
 
@@ -72,79 +84,67 @@ export class BookmarksService {
   }
 
   async isBookmarked(userId: string, productId: string): Promise<boolean> {
-    this.ensureNumericId(productId);
-
-    const bookmark = await this.bookmarksRepository.findOne({
-      where: { userId, productId },
-      select: ['userId', 'productId'],
+    const numericId = this.ensureNumericId(productId);
+    const bookmark = await this.prisma.bookmark.findUnique({
+      where: {
+        userId_productId: { userId, productId: numericId },
+      },
+      select: { userId: true },
     });
-
     return Boolean(bookmark);
   }
 
   async listBookmarkedProducts(
     userId: string,
     query: ListQueryDto,
-  ): Promise<PaginationResult<Product>> {
-    const { page, limit } = this.resolvePagination(query);
-    const qb = this.buildBookmarkedProductsQuery(userId);
+  ): Promise<PaginationResult<ProductResponseDto>> {
+    const { page, limit, skip } = clampPagination(query.page, query.limit);
 
-    return paginate(qb, page, limit);
+    const [total, bookmarks] = (await this.prisma.$transaction([
+      this.prisma.bookmark.count({ where: { userId } }),
+      this.prisma.bookmark.findMany({
+        where: { userId },
+        orderBy: [
+          { createdAt: 'desc' },
+          { productId: 'desc' },
+        ],
+        skip,
+        take: limit,
+        include: bookmarkInclude,
+      }),
+    ])) as [number, BookmarkWithProduct[]];
+
+    const data = bookmarks
+      .map((bookmark) => bookmark.product)
+      .filter((product): product is ProductWithRelations => Boolean(product))
+      .map((product) => Object.assign(mapProduct(product), { bookmarked: true }));
+
+    return toPaginationResult(data, total, page, limit);
   }
 
-  private buildBookmarkedProductsQuery(
-    userId: string,
-  ): SelectQueryBuilder<Product> {
-    return this.productsRepository
-      .createQueryBuilder('product')
-      .innerJoin(
-        Bookmark,
-        'bookmark',
-        'bookmark.productId = product.id AND bookmark.userId = :userId',
-        { userId },
-      )
-      .leftJoinAndSelect('product.categories', 'categories')
-      .leftJoinAndSelect('product.tags', 'tags')
-      .leftJoinAndSelect('product.suppliers', 'suppliers')
-      .leftJoinAndSelect('product.assets', 'assets')
-      .addSelect('bookmark.createdAt', 'bookmark_createdAt')
-      .orderBy('bookmark.createdAt', 'DESC')
-      .addOrderBy('product.id', 'DESC');
-  }
-
-  private resolvePagination(query: ListQueryDto): {
-    page: number;
-    limit: number;
-  } {
-    const page = query.page ?? 1;
-    const limit = Math.min(query.limit ?? 24, 100);
-    return { page, limit };
-  }
-
-  private ensureNumericId(productId: string): void {
+  private ensureNumericId(productId: string): bigint {
     if (!/^\d+$/.test(productId)) {
       throw new BadRequestException('Product id must be numeric');
     }
+    return BigInt(productId);
   }
 
-  private async insertBookmark(
-    userId: string,
-    productId: string,
-  ): Promise<void> {
+  private async createBookmark(userId: string, productId: bigint): Promise<void> {
     try {
-      await this.bookmarksRepository.insert({ userId, productId });
+      await this.prisma.bookmark.create({
+        data: {
+          userId,
+          productId,
+        },
+      });
     } catch (error) {
-      if (!this.isUniqueViolation(error)) {
-        throw error;
+      if (
+        error instanceof PrismaClientKnownRequestError &&
+        error.code === 'P2002'
+      ) {
+        return;
       }
+      throw error;
     }
-  }
-
-  private isUniqueViolation(error: unknown): boolean {
-    return (
-      error instanceof QueryFailedError &&
-      typeof error.driverError?.code === 'string' &&
-      error.driverError.code === '23505'
-    );
   }
 }

@@ -16,7 +16,7 @@ import {
   ValidateNested,
 } from 'class-validator';
 import { Type } from 'class-transformer';
-import { PricingType } from '../../entities/content/product.entity';
+import { PricingType } from '@app/prisma/prisma.constants';
 
 export class ProductAssetInputDto {
   @ApiProperty({

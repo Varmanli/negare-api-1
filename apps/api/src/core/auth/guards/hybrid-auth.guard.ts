@@ -17,6 +17,8 @@ import {
   CurrentUserPayload,
 } from '@app/common/decorators/current-user.decorator';
 import { IS_PUBLIC_KEY } from '@app/common/decorators/public.decorator';
+import { AllConfig } from '@app/config/config.module';
+import { AuthConfig } from '@app/config/auth.config';
 
 interface MockUserHeaderPayload {
   id: string;
@@ -26,6 +28,7 @@ interface MockUserHeaderPayload {
 interface AccessJwtPayload extends JwtPayload {
   sub: string;
   roles?: string[];
+  username?: string;
 }
 
 @Injectable()
@@ -38,9 +41,13 @@ export class HybridAuthGuard implements CanActivate {
 
   constructor(
     private readonly reflector: Reflector,
-    private readonly config: ConfigService,
+    private readonly config: ConfigService<AllConfig>,
   ) {
-    this.accessSecret = this.config.getOrThrow<string>('ACCESS_JWT_SECRET');
+    const auth = this.config.get<AuthConfig>('auth', { infer: true });
+    if (!auth) {
+      throw new Error('Auth configuration is not available.');
+    }
+    this.accessSecret = auth.accessSecret;
   }
 
   /**
@@ -108,6 +115,7 @@ export class HybridAuthGuard implements CanActivate {
         roles: Array.isArray(payload.roles)
           ? payload.roles.map((role) => String(role))
           : [],
+        username: payload.username,
       };
     } catch (error) {
       this.logger.debug(`Failed bearer auth: ${String(error)}`);
@@ -144,6 +152,7 @@ export class HybridAuthGuard implements CanActivate {
         roles: Array.from(
           new Set((parsed.roles ?? []).map((role) => String(role))),
         ),
+        username: undefined,
       };
       this.logger.debug(
         `Authenticated mock user ${user.id} roles=${user.roles.join(',')}`,

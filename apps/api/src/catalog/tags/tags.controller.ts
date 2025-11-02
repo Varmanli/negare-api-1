@@ -20,11 +20,11 @@ import {
 import { TagsService } from './tags.service';
 import { CreateTagDto } from './dtos/create-tag.dto';
 import { UpdateTagDto } from './dtos/update-tag.dto';
-import { Tag } from '../entities/content/tag.entity';
+import { TagResponseDto } from './dtos/tag-response.dto';
 import { JwtAuthGuard } from '@app/core/auth/guards/jwt-auth.guard';
 import { RolesGuard } from '@app/common/guards/roles.guard';
 import { Roles } from '@app/common/decorators/roles.decorator';
-import { RoleName } from '@app/core/roles/entities/role.entity';
+import { RoleName } from '@app/prisma/prisma.constants';
 
 @ApiTags('Catalog Tags')
 @Controller('catalog/tags')
@@ -39,10 +39,10 @@ export class TagsController {
   @ApiResponse({
     status: 200,
     description: 'Tags fetched successfully.',
-    type: Tag,
+    type: TagResponseDto,
     isArray: true,
   })
-  findAll(): Promise<Tag[]> {
+  findAll(): Promise<TagResponseDto[]> {
     return this.tagsService.findAll();
   }
 
@@ -58,9 +58,9 @@ export class TagsController {
   @ApiResponse({
     status: 201,
     description: 'Tag created successfully.',
-    type: Tag,
+    type: TagResponseDto,
   })
-  create(@Body() dto: CreateTagDto): Promise<Tag> {
+  create(@Body() dto: CreateTagDto): Promise<TagResponseDto> {
     return this.tagsService.create(dto);
   }
 
@@ -76,9 +76,12 @@ export class TagsController {
   @ApiResponse({
     status: 200,
     description: 'Tag updated successfully.',
-    type: Tag,
+    type: TagResponseDto,
   })
-  update(@Param('id') id: string, @Body() dto: UpdateTagDto): Promise<Tag> {
+  update(
+    @Param('id') id: string,
+    @Body() dto: UpdateTagDto,
+  ): Promise<TagResponseDto> {
     return this.tagsService.update(id, dto);
   }
 

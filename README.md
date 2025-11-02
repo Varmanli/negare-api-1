@@ -1,62 +1,97 @@
-# Negare API
+﻿# Negare API
 
-Backend for the Negare marketplace built with NestJS, TypeORM, PostgreSQL, and Next.js on the frontend. This document highlights the latest catalog engagement changes and how to operate the project.
+## Hardened Auth & Token Platform
 
-## Recent Changes — Split Likes & Bookmarks
+The authentication layer now guarantees hop-by-hop security for both CSR and SSR clients. Key traits:
 
-- Introduced dedicated `content.likes` and `content.bookmarks` tables with TypeORM entities and migrations.
-- Likes now drive the public `products.likesCount` counter, while bookmarks remain private per user.
-- Added `/catalog/products/:id/like` and `/catalog/products/:id/bookmark` toggle endpoints with idempotent behaviour.
-- Exposed profile feeds `/profile/likes` and `/profile/bookmarks` alongside existing downloads, purchases, and follow endpoints.
-- Product detail responses now include per-user `liked` and `bookmarked` flags when a user is authenticated.
-- Published Postman collection `postman/Catalog_Profile.postman_collection.json` covering catalog, profile, downloads, and follow flows.
+- Username / email / phone login issues an access token (response body) and a refresh token stored **only** in an HttpOnly cookie (`Path=/`).
+- Refresh tokens rotate on every call: the previous JTI is blacklisted, the new JTI is linked to the same session, and the cookie is reissued.
+- Sessions live in Redis with per-user sets, sorted indices, and reverse JTI lookups for revoke/touch flows.
+- Logout clears refresh cookies for every known path (`/`, `/api`, `/api/auth`), blacklists the supplied JTI, and tears down the Redis session.
+- Swagger exposes both `Bearer` and cookie auth schemes; the Postman collection mirrors the same behaviour for local testing.
 
-## Data Model & Migration Notes
+## Login → Refresh → Logout (happy path)
 
-- `content.favorites` is renamed to `content.bookmarks`; constraints were updated accordingly.
-- New `content.likes` table stores `(user_id, product_id)` pairs with a composite PK and an index on `product_id`.
-- Migration `1730000000000-SplitLikesBookmarks.ts` copies existing favorite rows into the likes table, clears bookmarks, and backfills `products.likes_count`.
-- Running the migration sequence:
+```text
+Login (identifier + password)
+  ├─ PasswordService.login → userId
+  ├─ SessionService.create(userId, ip, userAgent) → sid
+  ├─ RefreshService.issueTokensForUserId(userId, { sessionId: sid })
+  │     ├─ TokenService.signAccess + signRefresh (HS256)
+  │     ├─ Redis allow-list key auth:refresh:allow:<jti>
+  │     └─ SessionService.linkRefreshJti(userId, sid, jti)
+  └─ Set-Cookie refresh_token=…; HttpOnly; SameSite=Lax; Path=/
+
+Refresh (cookie only)
+  ├─ RefreshService.peekPayload(cookie) → { sub, sid, jti }
+  ├─ RefreshService.refresh(refreshToken)
+  │     ├─ validate allow-list + blacklist old jti
+  │     ├─ SessionService.unlinkRefreshJti(sub, sid, oldJti)
+  │     └─ mint new pair + relink session
+  ├─ SessionService.touch(sub, sid)
+  └─ Set-Cookie refresh_token=…; HttpOnly; Path=/
+
+Logout
+  ├─ RefreshService.peekPayload(refresh, ignoreExp=true)
+  ├─ RefreshService.revoke(refresh)
+  │     ├─ blacklist jti
+  │     └─ unlink session ↔ jti
+  ├─ SessionService.revoke(sub, sid)
+  └─ Clear refresh cookie on /api/auth, /api, /
+```
+
+## SSR vs CSR clients
+
+- **CSR (Next.js client components)** use the access token in memory/`Authorization` headers and delegate refresh/logout to the cookie-aware endpoints above.
+- **SSR (Next.js route handlers/pages)** simply forward the browser cookies. No server-side refresh calls are needed; render requests must opt into `cache: 'no-store'`.
+- Optional proxy route: expose `/api/auth/refresh` via a Next.js Route Handler that forwards the cookie and propagates the `Set-Cookie` response headers.
+- Never place the access token in cookies or `localStorage`; short-lived tokens live in process memory only.
+
+## Environment Quick Start
+
+Core `.env` knobs (see `.env.example`):
+
+- `ACCESS_JWT_SECRET` / `REFRESH_JWT_SECRET` & matching `*_EXPIRES` durations (`10m`, `30d`, etc.).
+- `COOKIE_SAMESITE`, `COOKIE_SECURE`, `COOKIE_REFRESH_PATH=/`, `COOKIE_ACCESS_PATH=/`.
+- `GLOBAL_PREFIX=api`, `CORS_ORIGIN=http://localhost:3000`, `REDIS_URL=redis://localhost:6379`.
+- Production: set `COOKIE_SECURE=true` and `COOKIE_SAMESITE=none` once the API is served over HTTPS.
+
+## Running & Testing
+
+```bash
+npm run start:dev        # local API (http://localhost:4000/api)
+npm run test             # unit tests (TokenService, RefreshService, SessionService, AuthController)
+npm run test:e2e         # end-to-end auth cookie/token rotation checks
+```
+
+All tests assume Redis is available — the suite boots against an in-memory fake Redis used by the services.
+
+## Docs & Tooling
+
+- Swagger: `http://localhost:4000/api/docs` (`Bearer` + cookie auth enabled).
+- Postman collection: `postman/auth.postman_collection.json` (login, refresh, logout, profile) with environment variables `baseUrl`, `GLOBAL_PREFIX`, and `accessToken`.
+- Example cURL probes:
   ```bash
-  npm run typeorm:migration:run
+  curl -i -X POST http://localhost:4000/api/auth/login \
+       -H "Content-Type: application/json" \
+       -d '{"identifier":"negare_user","password":"Password!1"}'
+
+  curl -i -X POST http://localhost:4000/api/auth/refresh \
+       -H "Cookie: refresh_token=<TOKEN>"
   ```
-  Rollback uses the down script but will merge bookmarks back into the legacy `favorites` table.
 
-## Development Workflow
+## Production Notes
 
-Install dependencies and start the server:
+- Configure your reverse proxy to forward `X-Forwarded-*` headers; Nest is already set to trust proxies in production.
+- Serve over HTTPS so `COOKIE_SECURE=true` can be enforced; combine with `SameSite=None` for cross-site SSR fetches.
+- Redis keys in play:
+  - `auth:refresh:allow:<jti>` – refresh allow-list with TTL = refresh token TTL.
+  - `auth:session:*` – session registry, bidirectional jti ↔ sid lookups, and paginated indices.
+  - `auth:rbl:<jti>` – refresh blacklist managed by `TokenService`.
 
-```bash
-npm install
-npm run start:dev
-```
+Together these changes bring the NestJS API in line with Next.js 15 SSR + CSR expectations while maintaining secure, single-use refresh tokens.
 
-Unit tests cover counters, likes, bookmarks, and product decoration logic:
 
-```bash
-npm test
-```
 
-## Product Detail Response
 
-- `GET /catalog/products/:idOrSlug` returns the product entity extended with `liked` and `bookmarked` booleans when the requester is authenticated.
-- Anonymous requests receive the same payload with both flags set to `false`.
-- View tracking and analytics updates remain unchanged.
 
-## API Collections
-
-- Import `postman/Catalog_Profile.postman_collection.json` to exercise catalog listing, product detail, like/bookmark toggles, downloads, profile histories, and supplier follow flows.
-- Collection variables:
-  - `baseUrl` – API root (defaults to `http://localhost:3000/api`).
-  - `productId`, `supplierId` – sample identifiers for quick testing.
-  - `accessToken`, `refreshToken` – JWT and refresh cookie values for authenticated calls.
-
-## Additional Commands
-
-- Generate new migrations: `npm run typeorm:migration:generate -- <MigrationName>`
-- Apply migrations: `npm run typeorm:migration:run`
-- Linting / formatting follow the project’s ESLint and Prettier configuration (run via `npm run lint` when available).
-
----
-
-For architectural details, refer to the source under `src/catalog`, `src/core`, and the respective DTO/service implementations added in this update.

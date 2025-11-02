@@ -3,7 +3,7 @@
  */
 import { Column, Entity, OneToMany } from 'typeorm';
 import { BaseEntity } from '@app/shared/base.entity';
-import { UserRole } from '@app/core/roles/entities/role.entity';
+import { UserRole } from './user-role.entity';
 
 /**
  * Enumerates canonical role names recognized by the platform.

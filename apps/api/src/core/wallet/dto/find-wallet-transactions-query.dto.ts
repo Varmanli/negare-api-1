@@ -13,7 +13,7 @@ import {
   WalletTransactionRefType,
   WalletTransactionStatus,
   WalletTransactionType,
-} from '../wallet-transaction.entity';
+} from '@app/prisma/prisma.constants';
 
 export class FindWalletTransactionsQueryDto {
   @ApiPropertyOptional({ format: 'uuid' })

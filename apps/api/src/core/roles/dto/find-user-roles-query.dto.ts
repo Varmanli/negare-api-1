@@ -1,9 +1,9 @@
-﻿/**
+/**
  * DTO describing optional filters when querying user-role assignments.
  */
 import { ApiPropertyOptional } from '@nestjs/swagger';
 import { IsEnum, IsOptional, IsUUID } from 'class-validator';
-import { RoleName } from '@app/core/roles/entities/role.entity';
+import { RoleName } from '@app/prisma/prisma.constants';
 
 /**
  * Filter object used to narrow user-role listings.

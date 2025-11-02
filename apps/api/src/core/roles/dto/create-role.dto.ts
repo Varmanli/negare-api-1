@@ -1,9 +1,9 @@
-﻿/**
+/**
  * DTO for creating new role definitions.
  */
 import { ApiProperty } from '@nestjs/swagger';
 import { IsEnum } from 'class-validator';
-import { RoleName } from '@app/core/roles/entities/role.entity';
+import { RoleName } from '@app/prisma/prisma.constants';
 
 /**
  * Captures the enum-backed name when creating a role.

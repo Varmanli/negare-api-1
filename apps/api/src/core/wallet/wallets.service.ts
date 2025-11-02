@@ -6,19 +6,18 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { InjectRepository } from '@nestjs/typeorm';
-import { DataSource, QueryFailedError, Repository } from 'typeorm';
+import type { Prisma as PrismaNamespace, Wallet, WalletTransaction } from '@prisma/client';
 import {
-  WalletTransaction,
+  Prisma,
+  PrismaClientKnownRequestError,
+  WalletCurrency,
+  WalletTransactionRefType,
   WalletTransactionStatus,
   WalletTransactionType,
-  WalletTransactionRefType,
-} from '../wallet-transactions/wallet-transaction.entity';
-import { CreateWalletDto } from './dto/create-wallet.dto';
-import { WalletBalanceDto } from './dto/wallet-balance.dto';
-import { WalletOperationDto } from './dto/wallet-operation.dto';
-import { CreateWalletTransactionDto } from './dto/create-wallet-transaction.dto';
-import { Wallet, WalletCurrency } from './wallet.entity';
+  JsonNull,
+} from '@app/prisma/prisma.constants';
+import { randomUUID } from 'node:crypto';
+import { PrismaService } from '@app/prisma/prisma.service';
 import {
   decimalStringToMinorUnits,
   minorUnitsToDecimalString,
@@ -27,7 +26,10 @@ import {
 } from './utils/amount.util';
 import { WalletAuditService } from './wallet-audit.service';
 import { WalletRateLimitService } from './wallet-rate-limit.service';
-import { randomUUID } from 'node:crypto';
+import { CreateWalletDto } from './dto/create-wallet.dto';
+import { WalletBalanceDto } from './dto/wallet-balance.dto';
+import { WalletOperationDto } from './dto/wallet-operation.dto';
+import { CreateWalletTransactionDto } from './dto/create-wallet-transaction.dto';
 import { WalletWebhookDto } from './dto/wallet-webhook.dto';
 import { CreateWalletTransferDto } from './dto/create-wallet-transfer.dto';
 
@@ -39,7 +41,7 @@ interface ApplyTransactionOptions {
   description?: string | null;
   refType?: WalletTransactionRefType;
   refId?: string | null;
-  metadata?: Record<string, unknown> | null;
+  metadata?: Prisma.InputJsonValue | null;
   createdById?: string | null;
   resolveOnDuplicate?: boolean;
   provider?: string | null;
@@ -47,42 +49,36 @@ interface ApplyTransactionOptions {
   groupId?: string | null;
 }
 
+type WalletWithRelations = PrismaNamespace.WalletGetPayload<{
+  include: { user: true; transactions: true };
+}>;
+
 @Injectable()
 export class WalletsService {
   private readonly logger = new Logger(WalletsService.name);
 
   constructor(
-    @InjectRepository(Wallet)
-    private readonly walletsRepository: Repository<Wallet>,
-    @InjectRepository(WalletTransaction)
-    private readonly walletTransactionsRepository: Repository<WalletTransaction>,
-    private readonly dataSource: DataSource,
+    private readonly prisma: PrismaService,
     private readonly config: ConfigService,
     private readonly audit: WalletAuditService,
     private readonly rateLimit: WalletRateLimitService,
   ) {}
 
-  findAll(): Promise<Wallet[]> {
-    return this.walletsRepository.find({
-      relations: {
-        user: true,
-        transactions: true,
-      },
+  findAll(): Promise<WalletWithRelations[]> {
+    return this.prisma.wallet.findMany({
+      include: { user: true, transactions: true },
     });
   }
 
-  findByUserId(userId: string): Promise<Wallet | null> {
-    return this.walletsRepository.findOne({
+  findByUserId(userId: string): Promise<WalletWithRelations | null> {
+    return this.prisma.wallet.findUnique({
       where: { userId },
-      relations: {
-        user: true,
-        transactions: true,
-      },
+      include: { user: true, transactions: true },
     });
   }
 
   async getBalance(userId: string): Promise<WalletBalanceDto> {
-    const wallet = await this.walletsRepository.findOne({
+    const wallet = await this.prisma.wallet.findUnique({
       where: { userId },
     });
 
@@ -91,7 +87,7 @@ export class WalletsService {
     }
 
     return {
-      balance: normalizeDecimalString(wallet.balance ?? '0'),
+      balance: normalizeDecimalString(wallet.balance.toString()),
       currency: wallet.currency,
     };
   }
@@ -100,21 +96,29 @@ export class WalletsService {
     userId: string,
     dto?: CreateWalletDto,
   ): Promise<Wallet> {
-    const existing = await this.findByUserId(userId);
-    if (existing) {
-      throw new ConflictException('Wallet already exists for user');
+    try {
+      return await this.prisma.wallet.create({
+        data: {
+          userId,
+          balance: '0',
+          currency: dto?.currency ?? WalletCurrency.IRR,
+        },
+      });
+    } catch (error) {
+      if (
+        error instanceof PrismaClientKnownRequestError &&
+        error.code === 'P2002'
+      ) {
+        throw new ConflictException('Wallet already exists for user');
+      }
+      throw error;
     }
-
-    return this.walletsRepository.save(
-      this.walletsRepository.create({
-        userId,
-        balance: '0',
-        currency: dto?.currency ?? WalletCurrency.IRR,
-      }),
-    );
   }
 
-  async credit(userId: string, dto: WalletOperationDto): Promise<WalletTransaction> {
+  async credit(
+    userId: string,
+    dto: WalletOperationDto,
+  ): Promise<WalletTransaction> {
     const result = await this.applyTransaction({
       userId,
       type: WalletTransactionType.CREDIT,
@@ -130,7 +134,10 @@ export class WalletsService {
     return result.transaction;
   }
 
-  async debit(userId: string, dto: WalletOperationDto): Promise<WalletTransaction> {
+  async debit(
+    userId: string,
+    dto: WalletOperationDto,
+  ): Promise<WalletTransaction> {
     const result = await this.applyTransaction({
       userId,
       type: WalletTransactionType.DEBIT,
@@ -175,118 +182,132 @@ export class WalletsService {
 
     const groupId = randomUUID();
 
-    const result = await this.dataSource.transaction(async (manager) => {
-      const walletRepo = manager.getRepository(Wallet);
-      const txRepo = manager.getRepository(WalletTransaction);
+    const result = await this.prisma.$transaction(
+      async (tx) => {
+        const [fromWallet, toWallet] = await Promise.all([
+          tx.wallet.findUnique({
+            where: { userId: fromUserId },
+            select: { id: true, userId: true, balance: true },
+          }),
+          tx.wallet.findUnique({
+            where: { userId: dto.toUserId },
+            select: { id: true, userId: true, balance: true },
+          }),
+        ]);
 
-      const wallets = await walletRepo
-        .createQueryBuilder('wallet')
-        .setLock('pessimistic_write')
-        .where('wallet.userId IN (:...userIds)', {
-          userIds: [fromUserId, dto.toUserId],
-        })
-        .orderBy('wallet.id', 'ASC')
-        .getMany();
+        if (!fromWallet) {
+          throw new NotFoundException('کیف پول مبدا یافت نشد');
+        }
+        if (!toWallet) {
+          throw new NotFoundException('کیف پول مقصد یافت نشد');
+        }
 
-      const fromWallet = wallets.find((wallet) => wallet.userId === fromUserId);
-      const toWallet = wallets.find((wallet) => wallet.userId === dto.toUserId);
-
-      if (!fromWallet) {
-        throw new NotFoundException('کیف پول مبدا یافت نشد');
-      }
-      if (!toWallet) {
-        throw new NotFoundException('کیف پول مقصد یافت نشد');
-      }
-
-      const existingDebit = await txRepo.findOne({
-        where: {
-          walletId: fromWallet.id,
-          idempotencyKey: dto.idempotencyKey,
-        },
-      });
-
-      if (existingDebit) {
-        const related = existingDebit.groupId
-          ? await txRepo.find({ where: { groupId: existingDebit.groupId } })
-          : [existingDebit];
-        throw new ConflictException({
-          code: 'TX_ALREADY_PROCESSED',
-          message: 'این انتقال قبلاً ثبت شده است',
-          groupId: existingDebit.groupId,
-          transactionIds: related.map((tx) => tx.id),
+        const existingDebit = await tx.walletTransaction.findUnique({
+          where: {
+            walletId_idempotencyKey: {
+              walletId: fromWallet.id,
+              idempotencyKey: dto.idempotencyKey,
+            },
+          },
         });
-      }
 
-      const fromBalanceMinor = decimalStringToMinorUnits(
-        fromWallet.balance ?? '0',
-      );
-      if (fromBalanceMinor < amountMinor) {
-        throw new BadRequestException({
-          code: 'INSUFFICIENT_FUNDS',
-          message: 'موجودی کیف پول کافی نیست',
+        if (existingDebit) {
+          const related = await tx.walletTransaction.findMany({
+            where: { groupId: existingDebit.groupId ?? undefined },
+          });
+          throw new ConflictException({
+            code: 'TX_ALREADY_PROCESSED',
+            message: 'تراکنش با این کلید قبلاً ثبت شده است',
+            groupId: existingDebit.groupId,
+            transactionIds: related.map((txItem) => txItem.id),
+          });
+        }
+
+        const fromBalanceMinor = decimalStringToMinorUnits(
+          fromWallet.balance.toString(),
+        );
+        if (fromBalanceMinor < amountMinor) {
+          throw new BadRequestException({
+            code: 'INSUFFICIENT_FUNDS',
+            message: 'موجودی کافی نیست',
+          });
+        }
+        const toBalanceMinor = decimalStringToMinorUnits(
+          toWallet.balance.toString(),
+        );
+
+        const newFromBalanceMinor = fromBalanceMinor - amountMinor;
+        const newToBalanceMinor = toBalanceMinor + amountMinor;
+
+        const debit = await tx.walletTransaction.create({
+          data: {
+            walletId: fromWallet.id,
+            userId: fromWallet.userId,
+            type: WalletTransactionType.DEBIT,
+            status: WalletTransactionStatus.COMPLETED,
+            amount: minorUnitsToDecimalString(amountMinor),
+            balanceAfter: minorUnitsToDecimalString(newFromBalanceMinor),
+            refType: WalletTransactionRefType.ADJUSTMENT,
+            refId: null,
+            description: dto.description ?? null,
+            idempotencyKey: dto.idempotencyKey,
+            metadata: {
+              origin: 'wallet-transfer',
+              direction: 'out',
+              toUserId: dto.toUserId,
+            },
+            createdById: fromUserId,
+            groupId,
+          },
         });
-      }
-      const toBalanceMinor = decimalStringToMinorUnits(toWallet.balance ?? '0');
 
-      const newFromBalance = fromBalanceMinor - amountMinor;
-      const newToBalance = toBalanceMinor + amountMinor;
+        const credit = await tx.walletTransaction.create({
+          data: {
+            walletId: toWallet.id,
+            userId: toWallet.userId,
+            type: WalletTransactionType.CREDIT,
+            status: WalletTransactionStatus.COMPLETED,
+            amount: minorUnitsToDecimalString(amountMinor),
+            balanceAfter: minorUnitsToDecimalString(newToBalanceMinor),
+            refType: WalletTransactionRefType.ADJUSTMENT,
+            refId: null,
+            description: dto.description ?? null,
+            idempotencyKey: groupId,
+            metadata: {
+              origin: 'wallet-transfer',
+              direction: 'in',
+              fromUserId,
+            },
+            createdById: fromUserId,
+            groupId,
+          },
+        });
 
-      const debitTx = txRepo.create({
-        walletId: fromWallet.id,
-        userId: fromWallet.userId,
-        type: WalletTransactionType.DEBIT,
-        status: WalletTransactionStatus.COMPLETED,
-        amount: minorUnitsToDecimalString(amountMinor),
-        balanceAfter: minorUnitsToDecimalString(newFromBalance),
-        refType: WalletTransactionRefType.ADJUSTMENT,
-        refId: null,
-        description: dto.description ?? null,
-        idempotencyKey: dto.idempotencyKey,
-        metadata: {
-          origin: 'wallet-transfer',
-          direction: 'out',
-          toUserId: dto.toUserId,
-        },
-        createdById: fromUserId,
-        groupId,
-      });
+        const [updatedFrom, updatedTo] = await Promise.all([
+          tx.wallet.update({
+            where: { id: fromWallet.id },
+            data: {
+              balance: minorUnitsToDecimalString(newFromBalanceMinor),
+            },
+          }),
+          tx.wallet.update({
+            where: { id: toWallet.id },
+            data: {
+              balance: minorUnitsToDecimalString(newToBalanceMinor),
+            },
+          }),
+        ]);
 
-      const creditTx = txRepo.create({
-        walletId: toWallet.id,
-        userId: toWallet.userId,
-        type: WalletTransactionType.CREDIT,
-        status: WalletTransactionStatus.COMPLETED,
-        amount: minorUnitsToDecimalString(amountMinor),
-        balanceAfter: minorUnitsToDecimalString(newToBalance),
-        refType: WalletTransactionRefType.ADJUSTMENT,
-        refId: null,
-        description: dto.description ?? null,
-        idempotencyKey: groupId,
-        metadata: {
-          origin: 'wallet-transfer',
-          direction: 'in',
-          fromUserId,
-        },
-        createdById: fromUserId,
-        groupId,
-      });
-
-      const savedDebit = await txRepo.save(debitTx);
-      const savedCredit = await txRepo.save(creditTx);
-
-      fromWallet.balance = minorUnitsToDecimalString(newFromBalance);
-      toWallet.balance = minorUnitsToDecimalString(newToBalance);
-      await walletRepo.save(fromWallet);
-      await walletRepo.save(toWallet);
-
-      return {
-        groupId,
-        debit: savedDebit,
-        credit: savedCredit,
-        fromBalanceAfter: fromWallet.balance,
-        toBalanceAfter: toWallet.balance,
-      };
-    });
+        return {
+          groupId,
+          debit,
+          credit,
+          fromBalanceAfter: updatedFrom.balance.toString(),
+          toBalanceAfter: updatedTo.balance.toString(),
+        };
+      },
+      { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
+    );
 
     await this.audit.log({
       userId: fromUserId,
@@ -356,11 +377,11 @@ export class WalletsService {
       return pending;
     }
 
-    const metadata = {
+    const metadata: Prisma.InputJsonValue = {
       origin: 'wallet-api',
       provider: dto.provider ?? null,
       externalRef: dto.externalRef ?? null,
-    } as Record<string, unknown>;
+    };
 
     const result = await this.applyTransaction({
       userId,
@@ -396,6 +417,156 @@ export class WalletsService {
     return result;
   }
 
+  async confirmWebhook(
+    provider: string,
+    dto: WalletWebhookDto,
+  ): Promise<{
+    transaction: WalletTransaction;
+    balanceAfter: string;
+    updated: boolean;
+  }> {
+    const amountMinor = this.parseAmount(dto.amount);
+
+    const outcome = await this.prisma.$transaction(
+      async (tx) => {
+        const transaction = await tx.walletTransaction.findFirst({
+          where: {
+            provider,
+            externalRef: dto.externalRef,
+          },
+        });
+
+        if (!transaction) {
+          throw new NotFoundException('تراکنش با این مرجع یافت نشد');
+        }
+
+        if (transaction.userId !== dto.userId) {
+          throw new BadRequestException({
+            code: 'USER_MISMATCH',
+            message: 'شناسه کاربر در درخواست تطابق ندارد',
+          });
+        }
+
+        if (transaction.type !== dto.type) {
+          throw new BadRequestException({
+            code: 'TYPE_MISMATCH',
+            message: 'نوع تراکنش با درخواست اولیه سازگار نیست',
+          });
+        }
+
+        const wallet = await tx.wallet.findUnique({
+          where: { id: transaction.walletId },
+        });
+
+        if (!wallet) {
+          throw new NotFoundException('کیف پول مرتبط یافت نشد');
+        }
+
+        const normalizedAmount = minorUnitsToDecimalString(amountMinor);
+        if (
+          normalizeDecimalString(transaction.amount.toString()) !==
+          normalizedAmount
+        ) {
+          throw new BadRequestException({
+            code: 'AMOUNT_MISMATCH',
+            message: 'مبلغ تأیید شده با مبلغ اولیه متفاوت است',
+          });
+        }
+
+        if (transaction.status !== WalletTransactionStatus.PENDING) {
+          return {
+            transaction,
+            balanceAfter: normalizeDecimalString(
+              (transaction.balanceAfter ?? wallet.balance).toString(),
+            ),
+            updated: false,
+          };
+        }
+
+        const currentBalanceMinor = decimalStringToMinorUnits(
+          wallet.balance.toString(),
+        );
+
+        let balanceAfter = normalizeDecimalString(wallet.balance.toString());
+        let status: WalletTransactionStatus;
+        let newBalanceMinor = currentBalanceMinor;
+
+        if (dto.status === 'success') {
+          if (transaction.type === WalletTransactionType.CREDIT) {
+            newBalanceMinor = currentBalanceMinor + amountMinor;
+          } else {
+            if (currentBalanceMinor < amountMinor) {
+              status = WalletTransactionStatus.FAILED;
+              const failedTx = await tx.walletTransaction.update({
+                where: { id: transaction.id },
+                data: {
+                  status,
+                  balanceAfter,
+                  metadata: {
+                    ...(transaction.metadata as Record<string, unknown> ?? {}),
+                    webhookStatus: dto.status,
+                    failedReason: 'insufficient_balance_on_confirm',
+                  },
+                },
+              });
+              return {
+                transaction: failedTx,
+                balanceAfter,
+                updated: true,
+              };
+            }
+            newBalanceMinor = currentBalanceMinor - amountMinor;
+          }
+
+          balanceAfter = minorUnitsToDecimalString(newBalanceMinor);
+          status = WalletTransactionStatus.COMPLETED;
+
+          await tx.wallet.update({
+            where: { id: wallet.id },
+            data: { balance: balanceAfter },
+          });
+          this.logDevSuccess(transaction, balanceAfter);
+        } else {
+          status = WalletTransactionStatus.FAILED;
+        }
+
+        const saved = await tx.walletTransaction.update({
+          where: { id: transaction.id },
+          data: {
+            status,
+            balanceAfter,
+            metadata: {
+              ...(transaction.metadata as Record<string, unknown> ?? {}),
+              webhookStatus: dto.status,
+              confirmedAt: new Date().toISOString(),
+            },
+          },
+        });
+
+        return {
+          transaction: saved,
+          balanceAfter,
+          updated: true,
+        };
+      },
+      { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
+    );
+
+    await this.audit.log({
+      userId: outcome.transaction.userId,
+      walletId: outcome.transaction.walletId,
+      action: 'confirm_webhook',
+      meta: {
+        provider,
+        externalRef: dto.externalRef,
+        updated: outcome.updated,
+        status: outcome.transaction.status,
+      },
+    });
+
+    return outcome;
+  }
+
   private async createPendingTransaction(input: {
     userId: string;
     type: 'credit' | 'debit';
@@ -407,269 +578,101 @@ export class WalletsService {
   }): Promise<{ transaction: WalletTransaction; balanceAfter: string }> {
     const amountMinor = this.parseAmount(input.amount);
 
-    return this.dataSource.transaction(async (manager) => {
-      const walletRepo = manager.getRepository(Wallet);
-      const txRepo = manager.getRepository(WalletTransaction);
-
-      const wallet = await walletRepo
-        .createQueryBuilder('wallet')
-        .setLock('pessimistic_write')
-        .where('wallet.userId = :userId', { userId: input.userId })
-        .getOne();
-
-      if (!wallet) {
-        throw new NotFoundException('کیف پولی برای این کاربر یافت نشد');
-      }
-
-      const existing = await txRepo.findOne({
-        where: {
-          walletId: wallet.id,
-          idempotencyKey: input.idempotencyKey,
-        },
-      });
-
-      if (existing) {
-        throw new ConflictException({
-          code: 'TX_ALREADY_PROCESSED',
-          message: 'تراکنش با این کلید قبلاً ثبت شده است',
-          transactionId: existing.id,
+    return this.prisma.$transaction(
+      async (tx) => {
+        const wallet = await tx.wallet.findUnique({
+          where: { userId: input.userId },
         });
-      }
 
-      const currentBalance = normalizeDecimalString(wallet.balance ?? '0');
-
-      const pending = txRepo.create({
-        walletId: wallet.id,
-        userId: wallet.userId,
-        type:
-          input.type === 'credit'
-            ? WalletTransactionType.CREDIT
-            : WalletTransactionType.DEBIT,
-        status: WalletTransactionStatus.PENDING,
-        amount: minorUnitsToDecimalString(amountMinor),
-        balanceAfter: currentBalance,
-        refType: WalletTransactionRefType.ADJUSTMENT,
-        refId: null,
-        description: input.description ?? null,
-        idempotencyKey: input.idempotencyKey,
-        metadata: {
-          origin: 'wallet-api',
-          mode: 'pending',
-          provider: input.provider ?? null,
-          externalRef: input.externalRef ?? null,
-        },
-        provider: input.provider ?? null,
-        externalRef: input.externalRef ?? null,
-        createdById: input.userId,
-      });
-
-      const saved = await txRepo.save(pending);
-
-      return {
-        transaction: saved,
-        balanceAfter: currentBalance,
-      };
-    });
-  }
-
-  async confirmWebhook(
-    provider: string,
-    dto: WalletWebhookDto,
-  ): Promise<{ transaction: WalletTransaction; balanceAfter: string; updated: boolean }>
-  {
-    const amountMinor = this.parseAmount(dto.amount);
-
-    const result = await this.dataSource.transaction(async (manager) => {
-      const txRepo = manager.getRepository(WalletTransaction);
-      const walletRepo = manager.getRepository(Wallet);
-
-      const transaction = await txRepo
-        .createQueryBuilder('tx')
-        .setLock('pessimistic_write')
-        .where('tx.provider = :provider AND tx.externalRef = :externalRef', {
-          provider,
-          externalRef: dto.externalRef,
-        })
-        .getOne();
-
-      if (!transaction) {
-        throw new NotFoundException('تراکنش در انتظار برای تایید یافت نشد');
-      }
-
-      if (transaction.userId !== dto.userId) {
-        throw new BadRequestException({
-          code: 'USER_MISMATCH',
-          message: 'اطلاعات کاربر با تراکنش در انتظار همخوانی ندارد',
-        });
-      }
-
-      if (transaction.type !== dto.type) {
-        throw new BadRequestException({
-          code: 'TYPE_MISMATCH',
-          message: 'نوع تراکنش با اطلاعات وب‌هوک همخوانی ندارد',
-        });
-      }
-
-      const wallet = await walletRepo
-        .createQueryBuilder('wallet')
-        .setLock('pessimistic_write')
-        .where('wallet.id = :walletId', { walletId: transaction.walletId })
-        .getOne();
-
-      if (!wallet) {
-        throw new NotFoundException('کیف پول مرتبط با تراکنش یافت نشد');
-      }
-
-      const normalizedAmount = minorUnitsToDecimalString(amountMinor);
-      if (normalizeDecimalString(transaction.amount) !== normalizedAmount) {
-        throw new BadRequestException({
-          code: 'AMOUNT_MISMATCH',
-          message: 'مبلغ اعلام شده با تراکنش در انتظار مطابقت ندارد',
-        });
-      }
-
-      const alreadyFinal =
-        transaction.status !== WalletTransactionStatus.PENDING;
-      if (alreadyFinal) {
-        return {
-          transaction,
-          balanceAfter: normalizeDecimalString(
-            transaction.balanceAfter ?? wallet.balance ?? '0',
-          ),
-          updated: false,
-        };
-      }
-
-      const currentBalanceMinor = decimalStringToMinorUnits(
-        wallet.balance ?? '0',
-      );
-
-      let balanceAfter = normalizeDecimalString(wallet.balance ?? '0');
-
-      if (dto.status === 'success') {
-        let newBalanceMinor = currentBalanceMinor;
-        if (transaction.type === WalletTransactionType.CREDIT) {
-          newBalanceMinor = currentBalanceMinor + amountMinor;
-        } else {
-          if (currentBalanceMinor < amountMinor) {
-            transaction.status = WalletTransactionStatus.FAILED;
-            transaction.balanceAfter = balanceAfter;
-            transaction.metadata = {
-              ...(transaction.metadata ?? {}),
-              webhookStatus: dto.status,
-              failedReason: 'insufficient_balance_on_confirm',
-            };
-
-            const failedTx = await txRepo.save(transaction);
-
-            return {
-              transaction: failedTx,
-              balanceAfter,
-              updated: true,
-            };
-          }
-          newBalanceMinor = currentBalanceMinor - amountMinor;
+        if (!wallet) {
+          throw new NotFoundException('کیف پول یافت نشد');
         }
 
-        wallet.balance = minorUnitsToDecimalString(newBalanceMinor);
-        balanceAfter = wallet.balance;
-        transaction.balanceAfter = balanceAfter;
-        transaction.status = WalletTransactionStatus.COMPLETED;
-        await walletRepo.save(wallet);
-        this.logDevSuccess(transaction, balanceAfter);
-      } else {
-        transaction.status = WalletTransactionStatus.FAILED;
-        transaction.balanceAfter = balanceAfter;
-      }
+        const existing = await tx.walletTransaction.findUnique({
+          where: {
+            walletId_idempotencyKey: {
+              walletId: wallet.id,
+              idempotencyKey: input.idempotencyKey,
+            },
+          },
+        });
 
-      transaction.metadata = {
-        ...(transaction.metadata ?? {}),
-        webhookStatus: dto.status,
-        confirmedAt: new Date().toISOString(),
-      };
+        if (existing) {
+          throw new ConflictException({
+            code: 'TX_ALREADY_PROCESSED',
+            message: 'تراکنش با این کلید قبلاً ثبت شده است',
+            transactionId: existing.id,
+          });
+        }
 
-      const saved = await txRepo.save(transaction);
+        const currentBalance = normalizeDecimalString(wallet.balance.toString());
 
-      return {
-        transaction: saved,
-        balanceAfter,
-        updated: true,
-      };
-    });
+        const pending = await tx.walletTransaction.create({
+          data: {
+            walletId: wallet.id,
+            userId: wallet.userId,
+            type:
+              input.type === 'credit'
+                ? WalletTransactionType.CREDIT
+                : WalletTransactionType.DEBIT,
+            status: WalletTransactionStatus.PENDING,
+            amount: minorUnitsToDecimalString(amountMinor),
+            balanceAfter: currentBalance,
+            refType: WalletTransactionRefType.ADJUSTMENT,
+            refId: null,
+            description: input.description ?? null,
+            idempotencyKey: input.idempotencyKey,
+            metadata: {
+              origin: 'wallet-api',
+              mode: 'pending',
+              provider: input.provider ?? null,
+              externalRef: input.externalRef ?? null,
+            },
+            provider: input.provider ?? null,
+            externalRef: input.externalRef ?? null,
+            createdById: input.userId,
+          },
+        });
 
-    await this.audit.log({
-      userId: result.transaction.userId,
-      walletId: result.transaction.walletId,
-      action: 'webhook_confirm',
-      meta: {
-        provider,
-        externalRef: result.transaction.externalRef,
-        status: result.transaction.status,
-        transactionId: result.transaction.id,
+        return {
+          transaction: pending,
+          balanceAfter: currentBalance,
+        };
       },
-    });
-
-    return result;
+      { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
+    );
   }
-
 
   private async applyTransaction(
     options: ApplyTransactionOptions,
   ): Promise<{ transaction: WalletTransaction; balanceAfter: string }> {
-    const {
-      userId,
-      type,
-      amount,
-      idempotencyKey,
-      description,
-      refType = WalletTransactionRefType.ADJUSTMENT,
-      refId = null,
-      metadata = null,
-      createdById = null,
-      resolveOnDuplicate = false,
-      provider = null,
-      externalRef = null,
-      groupId = null,
-    } = options;
+    const amountMinor = this.parseAmount(options.amount);
 
-    const amountMinor = this.parseAmount(amount);
-    if (amountMinor <= 0n) {
-      throw new BadRequestException({
-        code: 'INVALID_AMOUNT',
-        message: 'مبلغ تراکنش باید بزرگتر از صفر باشد',
-      });
-    }
-
-    try {
-      return await this.dataSource.transaction(async (manager) => {
-        const walletRepository = manager.getRepository(Wallet);
-        const txRepository = manager.getRepository(WalletTransaction);
-
-        const wallet = await walletRepository
-          .createQueryBuilder('wallet')
-          .setLock('pessimistic_write')
-          .where('wallet.userId = :userId', { userId })
-          .getOne();
+    return this.prisma.$transaction(
+      async (tx) => {
+        const wallet = await tx.wallet.findUnique({
+          where: { userId: options.userId },
+        });
 
         if (!wallet) {
-          throw new NotFoundException('کیف پولی برای این کاربر یافت نشد');
+          throw new NotFoundException('Wallet not found');
         }
 
-        const existing = await txRepository
-          .createQueryBuilder('tx')
-          .setLock('pessimistic_read')
-          .where('tx.walletId = :walletId AND tx.idempotencyKey = :key', {
-            walletId: wallet.id,
-            key: idempotencyKey,
-          })
-          .getOne();
+        const existing = await tx.walletTransaction.findUnique({
+          where: {
+            walletId_idempotencyKey: {
+              walletId: wallet.id,
+              idempotencyKey: options.idempotencyKey,
+            },
+          },
+        });
 
         if (existing) {
-          if (resolveOnDuplicate) {
-            return {
-              transaction: existing,
-              balanceAfter: normalizeDecimalString(wallet.balance ?? '0'),
-            };
+          if (options.resolveOnDuplicate) {
+            const balanceAfter = normalizeDecimalString(
+              (existing.balanceAfter ?? wallet.balance).toString(),
+            );
+            return { transaction: existing, balanceAfter };
           }
           throw new ConflictException({
             code: 'TX_ALREADY_PROCESSED',
@@ -679,84 +682,62 @@ export class WalletsService {
         }
 
         const currentBalanceMinor = decimalStringToMinorUnits(
-          wallet.balance ?? '0',
+          wallet.balance.toString(),
         );
 
-        if (
-          type === WalletTransactionType.DEBIT &&
-          currentBalanceMinor < amountMinor
-        ) {
-          throw new BadRequestException({
-            code: 'INSUFFICIENT_FUNDS',
-            message: 'موجودی کیف پول کافی نیست',
-          });
+        let newBalanceMinor = currentBalanceMinor;
+        if (options.type === WalletTransactionType.CREDIT) {
+          newBalanceMinor += amountMinor;
+        } else {
+          if (currentBalanceMinor < amountMinor) {
+            throw new BadRequestException({
+              code: 'INSUFFICIENT_FUNDS',
+              message: 'موجودی کافی نیست',
+            });
+          }
+          newBalanceMinor -= amountMinor;
         }
 
-        const newBalanceMinor =
-          type === WalletTransactionType.CREDIT
-            ? currentBalanceMinor + amountMinor
-            : currentBalanceMinor - amountMinor;
+        const balanceAfter = minorUnitsToDecimalString(newBalanceMinor);
 
-        const pendingTx = txRepository.create({
-          walletId: wallet.id,
-          userId: wallet.userId,
-          type,
-          status: WalletTransactionStatus.PENDING,
-          amount: minorUnitsToDecimalString(amountMinor),
-          balanceAfter: minorUnitsToDecimalString(newBalanceMinor),
-          refType,
-          refId,
-          description: description ?? null,
-          idempotencyKey,
-          metadata: metadata ?? null,
-          createdById,
-          provider,
-          externalRef,
-          groupId,
+        const transaction = await tx.walletTransaction.create({
+          data: {
+            walletId: wallet.id,
+            userId: wallet.userId,
+            type: options.type,
+            status: WalletTransactionStatus.COMPLETED,
+            amount: minorUnitsToDecimalString(amountMinor),
+            balanceAfter,
+            refType: options.refType ?? WalletTransactionRefType.ADJUSTMENT,
+            refId: options.refId ?? null,
+            description: options.description ?? null,
+            idempotencyKey: options.idempotencyKey,
+            metadata: this.normalizeJsonInput(options.metadata),
+            createdById: options.createdById ?? null,
+            provider: options.provider ?? null,
+            externalRef: options.externalRef ?? null,
+            groupId: options.groupId ?? null,
+          },
         });
 
-        const savedPending = await txRepository.save(pendingTx);
-
-        wallet.balance = minorUnitsToDecimalString(newBalanceMinor);
-        await walletRepository.save(wallet);
-
-        savedPending.status = WalletTransactionStatus.COMPLETED;
-        savedPending.balanceAfter = wallet.balance;
-        const completedTx = await txRepository.save(savedPending);
+        await tx.wallet.update({
+          where: { id: wallet.id },
+          data: { balance: balanceAfter },
+        });
 
         return {
-          transaction: completedTx,
-          balanceAfter: wallet.balance,
+          transaction,
+          balanceAfter,
         };
-      });
-    } catch (error) {
-      if (
-        error instanceof ConflictException ||
-        error instanceof BadRequestException ||
-        error instanceof NotFoundException
-      ) {
-        throw error;
-      }
+      },
+      { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
+    );
+  }
 
-      if (this.isDuplicateKeyError(error)) {
-        const existingResult = await this.getExistingResult(
-          userId,
-          idempotencyKey,
-        );
-        if (existingResult) {
-          if (resolveOnDuplicate) {
-            return existingResult;
-          }
-          throw new ConflictException({
-            code: 'TX_ALREADY_PROCESSED',
-            message: 'تراکنش با این کلید قبلاً ثبت شده است',
-            transactionId: existingResult.transaction.id,
-          });
-        }
-      }
-
-      throw error;
-    }
+  private normalizeJsonInput(
+    value: Prisma.InputJsonValue | null | undefined,
+  ): Prisma.InputJsonValue {
+    return (value ?? Prisma.JsonNull) as Prisma.InputJsonValue;
   }
 
   private parseAmount(amount: number | string): bigint {
@@ -770,20 +751,6 @@ export class WalletsService {
     }
   }
 
-  private isDuplicateKeyError(error: unknown): boolean {
-    if (error instanceof QueryFailedError) {
-      const code = error.driverError?.code;
-      if (code === '23505') {
-        return true;
-      }
-      const message: string | undefined = error.driverError?.message;
-      if (message && message.includes('SQLITE_CONSTRAINT')) {
-        return true;
-      }
-    }
-    return false;
-  }
-
   private isDev(): boolean {
     const env =
       this.config.get<string>('NODE_ENV') ?? process.env.NODE_ENV ?? 'development';
@@ -794,34 +761,9 @@ export class WalletsService {
     if (!this.isDev()) {
       return;
     }
-    const amount = normalizeDecimalString(tx.amount);
+    const amount = normalizeDecimalString(tx.amount.toString());
     this.logger.log(
       `تراکنش موفق: مبلغ ${amount} نوع ${tx.type} برای کاربر ${tx.userId}، موجودی جدید ${balanceAfter}`,
     );
-  }
-
-  private async getExistingResult(
-    userId: string,
-    idempotencyKey: string,
-  ): Promise<{ transaction: WalletTransaction; balanceAfter: string } | null> {
-    const wallet = await this.walletsRepository.findOne({ where: { userId } });
-    if (!wallet) {
-      return null;
-    }
-
-    const transaction = await this.walletTransactionsRepository.findOne({
-      where: { walletId: wallet.id, idempotencyKey },
-    });
-
-    if (!transaction) {
-      return null;
-    }
-
-    return {
-      transaction,
-      balanceAfter: normalizeDecimalString(
-        transaction.balanceAfter ?? wallet.balance ?? '0',
-      ),
-    };
   }
 }

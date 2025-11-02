@@ -1,5 +1,5 @@
 import { ApiProperty } from '@nestjs/swagger';
-import { WalletCurrency } from '../wallet.entity';
+import { WalletCurrency } from '@app/prisma/prisma.constants';
 
 export class WalletBalanceDto {
   @ApiProperty({ example: '250000' })

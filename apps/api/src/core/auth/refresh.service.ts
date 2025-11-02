@@ -1,7 +1,3 @@
-/**
- * RefreshService manages JWT issuance, rotation, and revocation for access/refresh tokens,
- * using Redis for refresh token allow-list semantics and UsersService for role hydration.
- */
 import {
   Inject,
   Injectable,
@@ -9,122 +5,152 @@ import {
   UnauthorizedException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { JwtPayload, SignOptions, sign, verify } from 'jsonwebtoken';
 import Redis from 'ioredis';
 import { randomUUID } from 'node:crypto';
-import { UsersService } from '@app/core/users/users.service';
-import { User } from '@app/core/users/user.entity';
+import { UsersService, UserWithRelations } from '@app/core/users/users.service';
 import { parseDurationToSeconds } from '@app/shared/utils/parse-duration.util';
-import { RoleName } from '@app/core/roles/entities/role.entity';
+import { RoleName } from '@app/prisma/prisma.constants';
+import { AllConfig } from '@app/config/config.module';
+import { AuthConfig } from '@app/config/auth.config';
+import { SessionService } from './session/session.service';
+import { RefreshAllowRecord, refreshAllowKey } from './auth.constants';
+import { TokenService, RefreshTokenPayload } from './token/token.service';
 
-interface TokenPair {
+export interface TokenPair {
   accessToken: string;
   refreshToken: string;
 }
 
-interface RefreshJwtPayload extends JwtPayload {
-  sub: string;
-  jti?: string;
-  purpose?: string;
+export interface IssueOpts {
+  sessionId?: string;
 }
 
 @Injectable()
-/**
- * Issues access/refresh token pairs, verifies refresh tokens, and enforces single-use JTIs.
- * Acts as the central point for token lifecycle operations referenced by controllers/services.
- */
 export class RefreshService {
   private readonly logger = new Logger(RefreshService.name);
 
-  private readonly accessSecret: string;
-  private readonly accessExpires: string;
-  private readonly refreshSecret: string;
-  private readonly refreshExpires: string;
   private readonly refreshTtlSeconds: number;
 
   constructor(
     @Inject('REDIS') private readonly redis: Redis,
-    private readonly config: ConfigService,
+    private readonly config: ConfigService<AllConfig>,
     private readonly usersService: UsersService,
+    private readonly sessions: SessionService,
+    private readonly tokens: TokenService,
   ) {
-    this.accessSecret = this.config.getOrThrow<string>('ACCESS_JWT_SECRET');
-    this.accessExpires = this.config.get<string>('ACCESS_JWT_EXPIRES') || '1h';
-    this.refreshSecret = this.config.getOrThrow<string>('REFRESH_JWT_SECRET');
-    this.refreshExpires =
-      this.config.get<string>('REFRESH_JWT_EXPIRES') || '30d';
+    const auth = this.config.get<AuthConfig>('auth', { infer: true });
+    if (!auth) {
+      throw new Error('Auth configuration is not available.');
+    }
     this.refreshTtlSeconds = parseDurationToSeconds(
-      this.refreshExpires,
+      auth.refreshExpires,
       30 * 24 * 3600,
     );
   }
 
-  /**
-   * Issues a token pair for an already-loaded user entity, hydrating roles when necessary.
-   * @param user Entity that may or may not already include relations.
-   * @returns Promise resolving to access/refresh tokens.
-   */
-  async issueTokensForUser(user: User): Promise<TokenPair> {
-    const hydrated =
-      user.userRoles && user.userRoles.length > 0
-        ? user
-        : await this.ensureUserWithRoles(user.id);
-    return this.issuePair(hydrated);
+  /** قبلی: فقط userId می‌گرفت — حالا opts اختیاری هم دارد */
+  async issueTokensForUserId(
+    userId: string,
+    opts: IssueOpts = {},
+  ): Promise<TokenPair> {
+    const hydrated = await this.usersService.ensureActiveWithRoles(userId);
+    return this.buildPair(hydrated, opts.sessionId); // ➜ sessionId پاس داده می‌شود
   }
 
-  /**
-   * Convenience wrapper that loads a user by id and issues tokens with role context.
-   * @param userId UUID of the subject.
-   * @returns Token pair ready for client consumption.
-   */
-  async issueTokensForUserId(userId: string): Promise<TokenPair> {
-    const hydrated = await this.ensureUserWithRoles(userId);
-    return this.issuePair(hydrated);
-  }
-
-  /**
-   * Verifies the supplied refresh token, rotates it, and returns a fresh token pair.
-   * @param refreshToken JWT string provided by the client.
-   * @returns New access/refresh tokens.
-   * @throws UnauthorizedException when the refresh token is invalid or revoked.
-   */
   async refresh(refreshToken: string): Promise<TokenPair> {
-    const payload = this.verifyRefreshToken(refreshToken);
-    const key = this.refreshKey(payload.sub, payload.jti);
+    const payload = await this.verifyRefreshToken(refreshToken);
+    const key = this.refreshKey(payload.jti);
 
-    const exists = await this.redis.get(key);
-    if (!exists) {
-      throw new UnauthorizedException(
-        'رفرش توکن نامعتبر است یا قبلاً استفاده شده است',
+    const stored = await this.redis.get(key);
+    if (!stored) {
+      this.logger.debug(
+        `Rejecting refresh for user ${payload.sub}: JTI ${payload.jti} not allow-listed`,
       );
+      throw new UnauthorizedException(
+        'Refresh token is no longer valid. Please sign in again.',
+      );
+    }
+
+    let record: RefreshAllowRecord | null = null;
+    try {
+      record = JSON.parse(stored) as RefreshAllowRecord;
+    } catch {
+      if (stored === '1') {
+        record = {
+          userId: payload.sub,
+          sessionId: payload.sid ?? null,
+        };
+      } else {
+        record = null;
+      }
+    }
+
+    if (!record || record.userId !== payload.sub) {
+      throw new UnauthorizedException('Malformed refresh token state.');
+    }
+
+    if (record.sessionId && record.sessionId !== payload.sid) {
+      throw new UnauthorizedException('Refresh token session mismatch.');
     }
 
     await this.redis.del(key);
 
-    const user = await this.ensureUserWithRoles(payload.sub);
-    const pair = await this.issuePair(user);
+    await this.tokens
+      .blacklistRefreshJti(payload.jti, this.refreshTtlSeconds)
+      .catch((err) =>
+        this.logger.warn(
+          `Failed to blacklist refresh JTI=${payload.jti}: ${err?.message ?? err}`,
+        ),
+      );
 
-    return pair;
-  }
-
-  /**
-   * Revokes a refresh token by deleting its JTI entry from Redis.
-   * Safe to call multiple times thanks to Redis DEL semantics.
-   * @param refreshToken JWT string which may or may not be expired.
-   */
-  async revoke(refreshToken: string): Promise<void> {
-    const payload = this.verifyRefreshToken(refreshToken, true);
-    if (!payload.sub || !payload.jti) {
-      return;
+    if (record.sessionId) {
+      await this.sessions
+        .unlinkRefreshJti(payload.sub, record.sessionId, payload.jti)
+        .catch(() => undefined);
     }
-    await this.redis.del(this.refreshKey(payload.sub, payload.jti));
+
+    const user = await this.usersService.ensureActiveWithRoles(payload.sub);
+    return this.buildPair(user, record.sessionId ?? payload.sid);
   }
 
-  /**
-   * Internal helper that constructs and stores access/refresh tokens while
-   * registering the refresh JTI for later revocation checks.
-   * @param user User entity with roles loaded.
-   */
-  private async issuePair(user: User): Promise<TokenPair> {
+  async revoke(refreshToken: string): Promise<void> {
+    const payload = await this.verifyRefreshToken(refreshToken, true, true);
+    if (!payload.sub || !payload.jti) return;
+
+    await this.redis.del(this.refreshKey(payload.jti));
+
+    await this.tokens
+      .blacklistRefreshJti(payload.jti, this.refreshTtlSeconds)
+      .catch((err) =>
+        this.logger.warn(
+          `Failed to blacklist revoked refresh JTI=${payload.jti}: ${err?.message ?? err}`,
+        ),
+      );
+
+    if (payload.sid) {
+      await this.sessions
+        .unlinkRefreshJti(payload.sub, payload.sid, payload.jti)
+        .catch(() => undefined);
+    }
+  }
+
+  /** NEW: فقط payload را برمی‌گرداند (برای logout/touch سناریوها) */
+  async peekPayload(
+    token: string,
+    ignoreExpiration = false,
+  ): Promise<RefreshTokenPayload | null> {
+    return this.tokens.peekRefresh(token, {
+      ignoreExpiration,
+      allowBlacklisted: true,
+    });
+  }
+
+  // ----------------- داخلی‌ها -----------------
+
+  private async buildPair(
+    user: UserWithRelations,
+    sessionId?: string,
+  ): Promise<TokenPair> {
     const jti = randomUUID();
     const rawRoles = (user.userRoles ?? [])
       .map((relation) => relation.role?.name)
@@ -133,95 +159,55 @@ export class RefreshService {
       role.toString(),
     );
 
-    const accessToken = sign(
-      {
-        sub: user.id,
-        username: user.username,
-        roles: roleNames,
-      },
-      this.accessSecret,
-      { expiresIn: this.accessExpires } as SignOptions,
-    );
+    const accessToken = this.tokens.signAccess({
+      userId: user.id,
+      roles: roleNames as RoleName[],
+    });
 
-    const refreshToken = sign(
-      {
-        sub: user.id,
-        purpose: 'refresh',
-      },
-      this.refreshSecret,
-      {
-        expiresIn: this.refreshExpires,
-        jwtid: jti,
-      } as SignOptions,
-    );
+    const refreshToken = this.tokens.signRefresh({
+      userId: user.id,
+      sessionId: sessionId ?? jti,
+      jti,
+    });
 
     const ttl = Math.max(this.refreshTtlSeconds, 60);
-    await this.redis.set(this.refreshKey(user.id, jti), '1', 'EX', ttl);
+
+    const record: RefreshAllowRecord = {
+      userId: user.id,
+      sessionId: sessionId ?? null,
+    };
+
+    await this.redis.set(this.refreshKey(jti), JSON.stringify(record), 'EX', ttl);
+
+    // اگر sessionId داریم، JTI را به سشن لینک کن تا بعداً بتوانیم revoke/touch کنیم
+    if (sessionId) {
+      await this.sessions.linkRefreshJti(user.id, sessionId, jti);
+    }
 
     return { accessToken, refreshToken };
   }
 
-  /**
-   * Verifies a refresh token signature and validates semantics such as JTI and purpose.
-   * @param token JWT string to inspect.
-   * @param ignoreExpiration True when we only need to revoke an expired token explicitly.
-   * @returns Decoded payload containing subject and jti claims.
-   * @throws UnauthorizedException when the token fails validation.
-   */
-  private verifyRefreshToken(
+  private async verifyRefreshToken(
     token: string,
     ignoreExpiration = false,
-  ): RefreshJwtPayload {
+    skipBlacklist = false,
+  ): Promise<RefreshTokenPayload> {
     if (!token) {
-      throw new UnauthorizedException('رفرش توکن ارسال نشده است');
+      throw new UnauthorizedException('Refresh token must be provided.');
     }
+
     try {
-      const payload = verify(token, this.refreshSecret, {
+      return await this.tokens.verifyRefresh(token, {
         ignoreExpiration,
-      }) as RefreshJwtPayload;
-
-      if (!payload.sub || !payload.jti) {
-        throw new UnauthorizedException('رفرش توکن معتبر نیست');
-      }
-      if (payload.purpose && payload.purpose !== 'refresh') {
-        throw new UnauthorizedException('رفرش توکن معتبر نیست');
-      }
-
-      return payload;
+        skipBlacklist,
+      });
     } catch (error) {
-      if (ignoreExpiration) {
-        this.logger.debug(`Ignore expiration verification failed: ${String(error)}`);
-      }
-      if (error instanceof UnauthorizedException) {
-        throw error;
-      }
-      this.logger.debug(`Failed to verify refresh token: ${String(error)}`);
-      throw new UnauthorizedException('رفرش توکن معتبر نیست');
+      throw new UnauthorizedException('Refresh token verification failed.');
     }
   }
 
-  /**
-   * Ensures we operate on an active user entity with roles preloaded.
-   * @param userId UUID of the subject.
-   */
-  private async ensureUserWithRoles(userId: string): Promise<User> {
-    const user = await this.usersService.findById(userId);
-    if (!user || user.isActive === false) {
-      throw new UnauthorizedException('کاربر یافت نشد یا غیرفعال است');
-    }
-    return user;
-  }
-
-  /**
-   * Generates the Redis key storing a refresh token's allow-list entry.
-   * @param userId Subject id.
-   * @param jti Refresh token unique identifier.
-   * @returns Namespaced key string.
-   */
-  private refreshKey(userId: string, jti?: string) {
-    if (!jti) {
-      return `rt:${userId}:unknown`;
-    }
-    return `rt:${userId}:${jti}`;
+  private refreshKey(jti: string | undefined): string {
+    if (!jti) return refreshAllowKey('unknown');
+    return refreshAllowKey(jti);
   }
 }

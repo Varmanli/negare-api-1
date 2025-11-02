@@ -1,30 +1,12 @@
 import {
   BadRequestException,
   Injectable,
-  InternalServerErrorException,
   NotFoundException,
 } from '@nestjs/common';
-import { InjectRepository } from '@nestjs/typeorm';
-import {
-  DataSource,
-  EntityManager,
-  In,
-  Repository,
-  SelectQueryBuilder,
-} from 'typeorm';
+import type { Prisma as PrismaNamespace } from '@prisma/client';
+import { Prisma, PricingType, JsonNull } from '@app/prisma/prisma.constants';
 import { CurrentUserPayload } from '@app/common/decorators/current-user.decorator';
-import { paginate, PaginationResult } from '../utils/pagination.util';
-import { buildUniqueSlugCandidate, slugify } from '../utils/slug.util';
-import {
-  Product,
-  PricingType,
-} from '../entities/content/product.entity';
-import { ProductAsset } from '../entities/content/product-asset.entity';
-import { ProductFile } from '../entities/content/product-file.entity';
-import { Category } from '../entities/content/category.entity';
-import { Tag } from '../entities/content/tag.entity';
-import { User } from '@app/core/users/user.entity';
-import { ProductView } from '../entities/analytics/product-view.entity';
+import { PrismaService } from '@app/prisma/prisma.service';
 import { CountersService } from '../counters/counters.service';
 import { LikesService } from '../likes/likes.service';
 import { BookmarksService } from '../bookmarks/bookmarks.service';
@@ -36,26 +18,28 @@ import {
   ListProductsQueryDto,
   ProductSortOption,
 } from './dtos/list-products-query.dto';
+import {
+  mapProduct,
+  mapProductDetail,
+  productWithRelations,
+  ProductWithRelations,
+} from './product.mapper';
+import { ProductResponseDto } from './dtos/product-response.dto';
+import { ProductFileResponseDto } from './dtos/product-file-response.dto';
+import {
+  PaginationResult,
+  clampPagination,
+  toPaginationResult,
+} from '../utils/pagination.util';
 import { isAdmin, isSupplier } from '../policies/catalog.policies';
+import { buildUniqueSlugCandidate, slugify } from '../utils/slug.util';
 
 @Injectable()
 export class ProductsService {
   private readonly slugMaxAttempts = 10;
 
   constructor(
-    private readonly dataSource: DataSource,
-    @InjectRepository(Product)
-    private readonly productsRepository: Repository<Product>,
-    @InjectRepository(ProductFile)
-    private readonly productFilesRepository: Repository<ProductFile>,
-    @InjectRepository(Category)
-    private readonly categoriesRepository: Repository<Category>,
-    @InjectRepository(Tag)
-    private readonly tagsRepository: Repository<Tag>,
-    @InjectRepository(User)
-    private readonly usersRepository: Repository<User>,
-    @InjectRepository(ProductView)
-    private readonly productViewsRepository: Repository<ProductView>,
+    private readonly prisma: PrismaService,
     private readonly countersService: CountersService,
     private readonly likesService: LikesService,
     private readonly bookmarksService: BookmarksService,
@@ -64,60 +48,438 @@ export class ProductsService {
 
   async listProducts(
     query: ListProductsQueryDto,
-  ): Promise<PaginationResult<Product>> {
-    const qb = this.buildListQuery(query);
-    return paginate(qb, query.page ?? 1, query.limit ?? 24);
+  ): Promise<PaginationResult<ProductResponseDto>> {
+    const { page, limit, skip } = clampPagination(query.page, query.limit);
+    const where = this.buildWhere(query);
+    const orderBy = this.buildOrder(query.sort);
+
+    const [total, products] = await this.prisma.$transaction([
+      this.prisma.product.count({ where }),
+      this.prisma.product.findMany({
+        ...productWithRelations,
+        where,
+        orderBy,
+        skip,
+        take: limit,
+      }),
+    ]);
+
+    const data = products.map((product) => mapProduct(product));
+
+    return toPaginationResult(data, total, page, limit);
   }
 
-  private buildListQuery(
-    query: ListProductsQueryDto,
-  ): SelectQueryBuilder<Product> {
-    const qb = this.productsRepository
-      .createQueryBuilder('product')
-      .leftJoinAndSelect('product.categories', 'categories')
-      .leftJoinAndSelect('product.tags', 'tags')
-      .leftJoinAndSelect('product.suppliers', 'suppliers')
-      .leftJoinAndSelect('product.assets', 'assets')
-      .distinct(true);
+  async findByIdOrSlug(idOrSlug: string): Promise<ProductWithRelations> {
+    const where: PrismaNamespace.ProductWhereInput = /^\d+$/.test(idOrSlug)
+      ? { id: BigInt(idOrSlug) }
+      : { slug: idOrSlug };
 
-    if (query.q) {
-      qb.andWhere(
-        '(product.title ILIKE :search OR product.description ILIKE :search)',
-        { search: `%${query.q}%` },
+    return this.findProductOrThrow(where);
+  }
+
+  async recordView(
+    productId: bigint,
+    options: {
+      currentUser?: CurrentUserPayload;
+      ip?: string;
+      userAgent?: string;
+    },
+  ): Promise<void> {
+    const { currentUser, ip, userAgent } = options;
+
+    await this.prisma.productView.create({
+      data: {
+        productId,
+        userId: currentUser?.id ?? null,
+        ip: ip ?? null,
+        ua: userAgent ?? null,
+      },
+    });
+
+    await this.countersService.incrementViews(productId.toString());
+  }
+
+  async decorateProductWithUserState(
+    product: ProductWithRelations,
+    currentUser?: CurrentUserPayload,
+  ): Promise<ProductDetailResponseDto> {
+    if (!currentUser) {
+      return mapProductDetail(product, false, false);
+    }
+
+    const [liked, bookmarked] = await Promise.all([
+      this.likesService.isProductLiked(currentUser.id, product.id.toString()),
+      this.bookmarksService.isBookmarked(currentUser.id, product.id.toString()),
+    ]);
+
+    return mapProductDetail(product, liked, bookmarked);
+  }
+
+  async attachOrReplaceFile(
+    productId: string,
+    file: UploadedFile,
+  ): Promise<ProductFileResponseDto> {
+    if (!file) {
+      throw new BadRequestException('File payload is required');
+    }
+
+    const id = this.ensureNumericId(productId);
+
+    const product = await this.prisma.product.findUnique({
+      where: { id },
+      select: {
+        id: true,
+        file: {
+          select: {
+            id: true,
+            storageKey: true,
+            originalName: true,
+            size: true,
+            mimeType: true,
+            createdAt: true,
+          },
+        },
+      },
+    });
+
+    if (!product) {
+      throw new NotFoundException('Product not found');
+    }
+
+    const existingFile = product.file;
+    const stored = await this.storageService.saveUploadedFile(file);
+
+    const fallbackSize =
+      typeof file.size === 'number'
+        ? file.size
+        : file.buffer && Buffer.isBuffer(file.buffer)
+          ? file.buffer.length
+          : undefined;
+    const derivedSize = stored.size ?? fallbackSize;
+    const sizeValue =
+      derivedSize !== undefined ? BigInt(Math.max(derivedSize, 0)) : null;
+
+    let savedFile: {
+      id: bigint;
+      storageKey: string;
+      originalName: string | null;
+      size: bigint | null;
+      mimeType: string | null;
+      createdAt: Date;
+    };
+
+    try {
+      savedFile = await this.prisma.$transaction(async (tx) => {
+        const baseData = {
+          storageKey: stored.storageKey,
+          originalName:
+            stored.originalName ??
+            file.originalname ??
+            existingFile?.originalName ??
+            null,
+          size: sizeValue,
+          mimeType:
+            stored.mimeType ?? file.mimetype ?? existingFile?.mimeType ?? null,
+          meta: (stored.meta as PrismaNamespace.JsonValue | undefined) ?? JsonNull,
+        };
+
+        if (existingFile) {
+          const updated = await tx.productFile.update({
+            where: { id: existingFile.id },
+            data: baseData,
+          });
+          return updated;
+        }
+
+        const created = await tx.productFile.create({
+          data: {
+            ...baseData,
+            createdAt: new Date(),
+          },
+        });
+
+        await tx.product.update({
+          where: { id: product.id },
+          data: { fileId: created.id },
+        });
+
+        return created;
+      });
+    } catch (error) {
+      await this.storageService
+        .deleteFile(stored.storageKey)
+        .catch(() => undefined);
+      throw error;
+    }
+
+    if (
+      existingFile?.storageKey &&
+      existingFile.storageKey !== stored.storageKey
+    ) {
+      await this.storageService
+        .deleteFile(existingFile.storageKey)
+        .catch(() => undefined);
+    }
+
+    const response = new ProductFileResponseDto();
+    response.id = savedFile.id.toString();
+    response.originalName = savedFile.originalName;
+    response.size = savedFile.size ? Number(savedFile.size) : undefined;
+    response.mimeType = savedFile.mimeType;
+    response.createdAt = savedFile.createdAt;
+
+    return response;
+  }
+
+  async createProduct(
+    dto: CreateProductDto,
+    currentUser: CurrentUserPayload,
+  ): Promise<ProductDetailResponseDto> {
+    const slug = await this.resolveUniqueSlug(dto.slug ?? slugify(dto.title));
+    this.validatePricing(dto.pricingType, dto.price);
+
+    const categoryIds = await this.resolveCategoryIds(dto.categories);
+    const tagIds = await this.resolveTagIds(dto.tags);
+    const supplierIds = await this.resolveSupplierIds(
+      dto.suppliers,
+      currentUser,
+    );
+
+    const product = await this.prisma.product.create({
+      data: {
+        slug,
+        title: dto.title,
+        description: dto.description ?? null,
+        coverUrl: dto.coverUrl ?? null,
+        pricingType: dto.pricingType,
+        price: dto.price ?? null,
+        active: dto.active ?? true,
+        publishedAt: dto.publishedAt ? new Date(dto.publishedAt) : null,
+        assets: dto.assets?.length
+          ? {
+              create: dto.assets.map((asset, index) => ({
+                url: asset.url,
+                alt: asset.alt ?? null,
+                order: asset.order ?? index,
+              })),
+            }
+          : undefined,
+        categoryLinks: categoryIds.length
+          ? {
+              create: categoryIds.map((id) => ({
+                category: { connect: { id } },
+              })),
+            }
+          : undefined,
+        tagLinks: tagIds.length
+          ? {
+              create: tagIds.map((id) => ({
+                tag: { connect: { id } },
+              })),
+            }
+          : undefined,
+        supplierLinks: supplierIds.length
+          ? {
+              create: supplierIds.map((id) => ({
+                user: { connect: { id } },
+              })),
+            }
+          : undefined,
+      },
+      ...productWithRelations,
+    });
+
+    return mapProductDetail(product, false, false);
+  }
+
+  async updateProduct(
+    id: string,
+    dto: UpdateProductDto,
+  ): Promise<ProductDetailResponseDto> {
+    const productId = this.ensureNumericId(id);
+    const existingProduct = await this.findProductOrThrow({ id: productId });
+
+    if (dto.pricingType ?? dto.price) {
+      const currentPrice =
+        existingProduct.price !== null
+          ? existingProduct.price.toString()
+          : undefined;
+      this.validatePricing(
+        dto.pricingType ?? existingProduct.pricingType,
+        dto.price ?? currentPrice,
       );
     }
 
+    const data: PrismaNamespace.ProductUpdateInput = {};
+
+    if (dto.title !== undefined) {
+      data.title = dto.title;
+    }
+    if (dto.description !== undefined) {
+      data.description = dto.description ?? null;
+    }
+    if (dto.coverUrl !== undefined) {
+      data.coverUrl = dto.coverUrl ?? null;
+    }
+    if (dto.slug !== undefined) {
+      data.slug = await this.resolveUniqueSlug(dto.slug, id);
+    } else if (dto.title) {
+      data.slug = await this.resolveUniqueSlug(slugify(dto.title), id);
+    }
+    if (dto.pricingType !== undefined) {
+      data.pricingType = dto.pricingType;
+    }
+    if (dto.price !== undefined) {
+      data.price = dto.price ?? null;
+    }
+    if (dto.active !== undefined) {
+      data.active = dto.active;
+    }
+    if (dto.publishedAt !== undefined) {
+      data.publishedAt = dto.publishedAt ? new Date(dto.publishedAt) : null;
+    }
+
+    if (dto.categories !== undefined) {
+      const categoryIds = await this.resolveCategoryIds(dto.categories);
+      data.categoryLinks = categoryIds.length
+        ? {
+            deleteMany: {},
+            create: categoryIds.map((categoryId) => ({
+              category: { connect: { id: categoryId } },
+            })),
+          }
+        : { deleteMany: {} };
+    }
+
+    if (dto.tags !== undefined) {
+      const tagIds = await this.resolveTagIds(dto.tags);
+      data.tagLinks = tagIds.length
+        ? {
+            deleteMany: {},
+            create: tagIds.map((tagId) => ({
+              tag: { connect: { id: tagId } },
+            })),
+          }
+        : { deleteMany: {} };
+    }
+
+    if (dto.suppliers !== undefined) {
+      const supplierIds = await this.resolveSupplierIds(dto.suppliers);
+      data.supplierLinks = supplierIds.length
+        ? {
+            deleteMany: {},
+            create: supplierIds.map((supplierId) => ({
+              user: { connect: { id: supplierId } },
+            })),
+          }
+        : { deleteMany: {} };
+    }
+
+    if (dto.assets !== undefined) {
+      data.assets = dto.assets.length
+        ? {
+            deleteMany: {},
+            create: dto.assets.map((asset, index) => ({
+              url: asset.url,
+              alt: asset.alt ?? null,
+              order: asset.order ?? index,
+            })),
+          }
+        : { deleteMany: {} };
+    }
+
+    await this.prisma.product.update({
+      where: { id: productId },
+      data,
+    });
+
+    const updated = await this.findProductOrThrow({ id: productId });
+    return mapProductDetail(updated, false, false);
+  }
+
+  async removeProduct(id: string): Promise<void> {
+    const productId = this.ensureNumericId(id);
+
+    const product = await this.prisma.product.findUnique({
+      where: { id: productId },
+      select: {
+        file: { select: { storageKey: true } },
+      },
+    });
+
+    if (!product) {
+      throw new NotFoundException('Product not found');
+    }
+
+    await this.prisma.$transaction(async (tx) => {
+      await tx.productAsset.deleteMany({ where: { productId } });
+      await tx.productCategory.deleteMany({ where: { productId } });
+      await tx.productTag.deleteMany({ where: { productId } });
+      await tx.productSupplier.deleteMany({ where: { productId } });
+      await tx.productView.deleteMany({ where: { productId } });
+      await tx.productDownload.deleteMany({ where: { productId } });
+      await tx.like.deleteMany({ where: { productId } });
+      await tx.bookmark.deleteMany({ where: { productId } });
+      await tx.product.delete({ where: { id: productId } });
+    });
+
+    if (product.file?.storageKey) {
+      await this.storageService
+        .deleteFile(product.file.storageKey)
+        .catch(() => undefined);
+    }
+  }
+
+  private buildWhere(query: ListProductsQueryDto): PrismaNamespace.ProductWhereInput {
+    const where: PrismaNamespace.ProductWhereInput = {};
+
+    if (query.q) {
+      where.OR = [
+        { title: { contains: query.q, mode: Prisma.QueryMode.insensitive } },
+        { description: { contains: query.q, mode: Prisma.QueryMode.insensitive } },
+      ];
+    }
+
     if (query.category) {
-      const isNumeric = /^\d+$/.test(query.category);
-      qb.innerJoin('product.categories', 'filterCategory');
-      if (isNumeric) {
-        qb.andWhere('filterCategory.id = :categoryId', {
-          categoryId: query.category,
-        });
-      } else {
-        qb.andWhere('LOWER(filterCategory.slug) = LOWER(:categorySlug)', {
-          categorySlug: query.category,
-        });
-      }
+      const categoryFilter: PrismaNamespace.ProductCategoryWhereInput = /^\d+$/.test(
+        query.category,
+      )
+        ? { categoryId: this.ensureNumericId(query.category) }
+        : {
+            category: {
+              is: {
+                slug: {
+                  equals: query.category,
+                  mode: Prisma.QueryMode.insensitive,
+                },
+              },
+            },
+          };
+      where.categoryLinks = { some: categoryFilter };
     }
 
     if (query.tag) {
-      const isNumeric = /^\d+$/.test(query.tag);
-      qb.innerJoin('product.tags', 'filterTag');
-      if (isNumeric) {
-        qb.andWhere('filterTag.id = :tagId', { tagId: query.tag });
-      } else {
-        qb.andWhere('LOWER(filterTag.slug) = LOWER(:tagSlug)', {
-          tagSlug: query.tag,
-        });
-      }
+      const tagFilter: PrismaNamespace.ProductTagWhereInput = /^\d+$/.test(
+        query.tag,
+      )
+        ? { tagId: this.ensureNumericId(query.tag) }
+        : {
+            tag: {
+              is: {
+                slug: {
+                  equals: query.tag,
+                  mode: Prisma.QueryMode.insensitive,
+                },
+              },
+            },
+          };
+      where.tagLinks = { some: tagFilter };
     }
 
     if (query.supplierId) {
-      qb.innerJoin('product.suppliers', 'filterSupplier');
-      qb.andWhere('filterSupplier.id = :supplierId', {
-        supplierId: query.supplierId,
-      });
+      where.supplierLinks = {
+        some: { userId: query.supplierId },
+      };
     }
 
     if (query.pricingType) {
@@ -129,342 +491,49 @@ export class ProductsService {
         );
 
       if (pricingTypes.length > 0) {
-        qb.andWhere('product.pricingType IN (:...pricingTypes)', {
-          pricingTypes,
-        });
+        where.pricingType = { in: pricingTypes };
       }
     }
 
     if (typeof query.active === 'boolean') {
-      qb.andWhere('product.active = :active', { active: query.active });
+      where.active = query.active;
     }
 
-    const sortOption = query.sort ?? ProductSortOption.NEWEST;
-    switch (sortOption) {
-      case ProductSortOption.DOWNLOADS:
-        qb.orderBy('product.downloadsCount', 'DESC');
-        break;
-      case ProductSortOption.LIKES:
-        qb.orderBy('product.likesCount', 'DESC');
-        break;
-      case ProductSortOption.POPULAR:
-        qb.orderBy('product.viewsCount', 'DESC');
-        break;
-      case ProductSortOption.PRICE_ASC:
-        qb.orderBy('product.price', 'ASC', 'NULLS LAST');
-        break;
-      case ProductSortOption.PRICE_DESC:
-        qb.orderBy('product.price', 'DESC', 'NULLS FIRST');
-        break;
-      default:
-        qb.orderBy('product.publishedAt', 'DESC', 'NULLS LAST');
-        qb.addOrderBy('product.createdAt', 'DESC');
-        break;
-    }
-
-    if (sortOption !== ProductSortOption.NEWEST) {
-      qb.addOrderBy('product.publishedAt', 'DESC', 'NULLS LAST');
-      qb.addOrderBy('product.createdAt', 'DESC');
-    }
-
-    return qb;
+    return where;
   }
 
-  async findByIdOrSlug(idOrSlug: string): Promise<Product> {
-    const whereClause = /^\d+$/.test(idOrSlug)
-      ? { id: idOrSlug }
-      : { slug: idOrSlug };
+  private buildOrder(
+    sort: ProductSortOption = ProductSortOption.NEWEST,
+  ): PrismaNamespace.ProductOrderByWithRelationInput[] {
+    switch (sort) {
+      case ProductSortOption.DOWNLOADS:
+        return [{ downloadsCount: 'desc' }, { createdAt: 'desc' }];
+      case ProductSortOption.LIKES:
+        return [{ likesCount: 'desc' }, { createdAt: 'desc' }];
+      case ProductSortOption.POPULAR:
+        return [{ viewsCount: 'desc' }, { createdAt: 'desc' }];
+      case ProductSortOption.PRICE_ASC:
+        return [{ price: 'asc' }, { createdAt: 'desc' }];
+      case ProductSortOption.PRICE_DESC:
+        return [{ price: 'desc' }, { createdAt: 'desc' }];
+      default:
+        return [{ publishedAt: 'desc' }, { createdAt: 'desc' }];
+    }
+  }
 
-    const product = await this.productsRepository.findOne({
-      where: whereClause,
-      relations: ['categories', 'tags', 'suppliers', 'assets', 'file'],
+  private async findProductOrThrow(
+    where: PrismaNamespace.ProductWhereInput,
+  ): Promise<ProductWithRelations> {
+    const product = await this.prisma.product.findFirst({
+      where,
+      ...productWithRelations,
     });
 
     if (!product) {
       throw new NotFoundException('Product not found');
-    }
-
-    if (product.assets) {
-      product.assets.sort((a, b) => {
-        const orderDelta = (a.order ?? 0) - (b.order ?? 0);
-        if (orderDelta !== 0) {
-          return orderDelta;
-        }
-        const aId = Number(a.id);
-        const bId = Number(b.id);
-        if (!Number.isNaN(aId) && !Number.isNaN(bId)) {
-          return aId - bId;
-        }
-        return String(a.id).localeCompare(String(b.id));
-      });
     }
 
     return product;
-  }
-
-  async recordView(
-    product: Product,
-    options: {
-      currentUser?: CurrentUserPayload;
-      ip?: string;
-      userAgent?: string;
-    },
-  ): Promise<void> {
-    const { currentUser, ip, userAgent } = options;
-
-    await this.productViewsRepository.insert({
-      productId: product.id,
-      userId: currentUser?.id,
-      ip: ip ?? undefined,
-      ua: userAgent,
-    });
-
-    void this.countersService.incrementViews(product.id);
-  }
-
-  async decorateProductWithUserState(
-    product: Product,
-    currentUser?: CurrentUserPayload,
-  ): Promise<ProductDetailResponseDto> {
-    if (!currentUser) {
-      return Object.assign(product, {
-        liked: false,
-        bookmarked: false,
-      }) as ProductDetailResponseDto;
-    }
-
-    const [liked, bookmarked] = await Promise.all([
-      this.likesService.isProductLiked(currentUser.id, product.id),
-      this.bookmarksService.isBookmarked(currentUser.id, product.id),
-    ]);
-
-    return Object.assign(product, {
-      liked,
-      bookmarked,
-    }) as ProductDetailResponseDto;
-  }
-
-  async attachOrReplaceFile(
-    productId: string,
-    file: UploadedFile,
-  ): Promise<ProductFile> {
-    if (!file) {
-      throw new BadRequestException('File payload is required');
-    }
-
-    const product = await this.productsRepository.findOne({
-      where: { id: productId },
-      relations: ['file'],
-    });
-
-    if (!product) {
-      throw new NotFoundException('Product not found');
-    }
-
-    const existingFile = product.file
-      ? await this.productFilesRepository
-          .createQueryBuilder('file')
-          .where('file.id = :id', { id: product.file.id })
-          .addSelect('file.storageKey')
-          .getOne()
-      : null;
-
-    const stored = await this.storageService.saveUploadedFile(file);
-
-    try {
-      const productFile = await this.dataSource.transaction(async (manager) => {
-        const filesRepo = manager.getRepository(ProductFile);
-        const productsRepo = manager.getRepository(Product);
-
-        let record = existingFile
-          ? await filesRepo.findOne({ where: { id: existingFile.id } })
-          : filesRepo.create();
-
-        if (!record) {
-          record = filesRepo.create();
-        }
-
-        const fallbackSize =
-          typeof file.size === 'number'
-            ? file.size
-            : file.buffer && Buffer.isBuffer(file.buffer)
-              ? file.buffer.length
-              : undefined;
-        const derivedSize = stored.size ?? fallbackSize;
-
-        record.storageKey = stored.storageKey;
-        record.originalName = stored.originalName ?? file.originalname ?? undefined;
-        record.size = derivedSize !== undefined ? String(derivedSize) : undefined;
-        record.mimeType = stored.mimeType ?? file.mimetype ?? undefined;
-        record.meta = stored.meta ?? undefined;
-        record.product = product;
-
-        const savedRecord = await filesRepo.save(record);
-        product.file = savedRecord;
-        await productsRepo.save(product);
-
-        return savedRecord;
-      });
-
-      if (existingFile?.storageKey && existingFile.storageKey !== stored.storageKey) {
-        await this.storageService.deleteFile(existingFile.storageKey).catch(() => undefined);
-      }
-
-      return productFile;
-    } catch (error) {
-      await this.storageService.deleteFile(stored.storageKey).catch(() => undefined);
-      throw error;
-    }
-  }
-
-  async createProduct(
-    dto: CreateProductDto,
-    currentUser: CurrentUserPayload,
-  ): Promise<Product> {
-    const slug = await this.resolveUniqueSlug(dto.slug ?? slugify(dto.title));
-    this.validatePricing(dto.pricingType, dto.price);
-
-    const product = await this.dataSource.transaction(async (manager) => {
-      const productRepo = manager.getRepository(Product);
-      const categories = await this.resolveCategories(manager, dto.categories);
-      const tags = await this.resolveTags(manager, dto.tags);
-      const suppliers = await this.resolveSuppliers(manager, dto.suppliers, currentUser);
-
-      const newProduct = productRepo.create({
-        slug,
-        title: dto.title,
-        description: dto.description,
-        coverUrl: dto.coverUrl,
-        pricingType: dto.pricingType,
-        price: dto.price ?? null,
-        active: dto.active ?? true,
-        publishedAt: dto.publishedAt ? new Date(dto.publishedAt) : null,
-        categories,
-        tags,
-        suppliers,
-        assets: dto.assets?.map((asset, index) =>
-          manager.getRepository(ProductAsset).create({
-            url: asset.url,
-            alt: asset.alt,
-            order: asset.order ?? index,
-          }),
-        ),
-      });
-
-      const savedProduct = await productRepo.save(newProduct);
-
-      if (Array.isArray(savedProduct)) {
-        throw new InternalServerErrorException(
-          'Unexpected array response while saving product',
-        );
-      }
-
-      return savedProduct;
-    });
-
-    return this.findByIdOrSlug(product.id);
-  }
-
-  async updateProduct(id: string, dto: UpdateProductDto): Promise<Product> {
-    const product = await this.productsRepository.findOne({
-      where: { id },
-      relations: ['categories', 'tags', 'suppliers', 'assets'],
-    });
-
-    if (!product) {
-      throw new NotFoundException('Product not found');
-    }
-
-    if (dto.slug && dto.slug !== product.slug) {
-      product.slug = await this.resolveUniqueSlug(dto.slug, id);
-    } else if (!dto.slug && dto.title && dto.title !== product.title) {
-      product.slug = await this.resolveUniqueSlug(slugify(dto.title), id);
-    }
-
-    if (dto.pricingType ?? dto.price) {
-      this.validatePricing(dto.pricingType ?? product.pricingType, dto.price ?? product.price ?? undefined);
-      if (dto.pricingType) {
-        product.pricingType = dto.pricingType;
-      }
-      if (dto.price !== undefined) {
-        product.price = dto.price ?? null;
-      }
-    }
-
-    if (dto.title !== undefined) {
-      product.title = dto.title;
-    }
-    if (dto.description !== undefined) {
-      product.description = dto.description;
-    }
-    if (dto.coverUrl !== undefined) {
-      product.coverUrl = dto.coverUrl;
-    }
-    if (dto.active !== undefined) {
-      product.active = dto.active;
-    }
-    if (dto.publishedAt !== undefined) {
-      product.publishedAt = dto.publishedAt ? new Date(dto.publishedAt) : null;
-    }
-
-    await this.dataSource.transaction(async (manager) => {
-      const productRepo = manager.getRepository(Product);
-
-      if (dto.categories) {
-        product.categories = await this.resolveCategories(manager, dto.categories);
-      }
-
-      if (dto.tags) {
-        product.tags = await this.resolveTags(manager, dto.tags);
-      }
-
-      if (dto.suppliers) {
-        product.suppliers = await this.resolveSuppliers(
-          manager,
-          dto.suppliers,
-        );
-      }
-
-      if (dto.assets) {
-        const assetRepo = manager.getRepository(ProductAsset);
-        product.assets = dto.assets.map((asset, index) =>
-          assetRepo.create({
-            url: asset.url,
-            alt: asset.alt,
-            order: asset.order ?? index,
-          }),
-        );
-      }
-
-      await productRepo.save(product);
-    });
-
-    return this.findByIdOrSlug(product.id);
-  }
-
-  async removeProduct(id: string): Promise<void> {
-    const product = await this.productsRepository.findOne({
-      where: { id },
-      relations: ['file', 'assets'],
-    });
-
-    if (!product) {
-      throw new NotFoundException('Product not found');
-    }
-
-    const existingFile = product.file
-      ? await this.productFilesRepository
-          .createQueryBuilder('file')
-          .where('file.id = :id', { id: product.file.id })
-          .addSelect('file.storageKey')
-          .getOne()
-      : null;
-
-    await this.productsRepository.remove(product);
-
-    if (existingFile?.storageKey) {
-      await this.storageService.deleteFile(existingFile.storageKey).catch(() => undefined);
-    }
   }
 
   private async resolveUniqueSlug(
@@ -477,11 +546,12 @@ export class ProductsService {
 
     for (let attempt = 0; attempt < this.slugMaxAttempts; attempt += 1) {
       const candidate = buildUniqueSlugCandidate(baseSlug, attempt);
-      const existing = await this.productsRepository.findOne({
+      const existing = await this.prisma.product.findUnique({
         where: { slug: candidate },
+        select: { id: true },
       });
 
-      if (!existing || (ignoreId && existing.id === ignoreId)) {
+      if (!existing || (ignoreId && existing.id.toString() === ignoreId)) {
         return candidate;
       }
     }
@@ -496,9 +566,7 @@ export class ProductsService {
     const forbidsPrice = pricingType === PricingType.FREE;
 
     if (requiresPrice && (!price || Number(price) <= 0)) {
-      throw new BadRequestException(
-        'Price is required for paid pricing types',
-      );
+      throw new BadRequestException('Price is required for paid pricing types');
     }
 
     if (forbidsPrice && price) {
@@ -506,56 +574,58 @@ export class ProductsService {
     }
   }
 
-  private async resolveCategories(
-    manager: EntityManager,
+  private async resolveCategoryIds(
     categoryIds: Array<number | string> | undefined,
-  ): Promise<Category[]> {
+  ): Promise<bigint[]> {
     if (!categoryIds?.length) {
       return [];
     }
 
-    const categories = await manager.getRepository(Category).find({
-      where: { id: In(categoryIds.map((id) => String(id))) },
+    const ids = categoryIds.map((value) => this.ensureNumericId(value));
+    const categories = await this.prisma.category.findMany({
+      where: { id: { in: ids } },
+      select: { id: true },
     });
 
-    if (categories.length !== categoryIds.length) {
+    if (categories.length !== ids.length) {
       throw new BadRequestException('One or more categories do not exist');
     }
 
-    return categories;
+    return ids;
   }
 
-  private async resolveTags(
-    manager: EntityManager,
+  private async resolveTagIds(
     tagIds: Array<number | string> | undefined,
-  ): Promise<Tag[]> {
+  ): Promise<bigint[]> {
     if (!tagIds?.length) {
       return [];
     }
 
-    const tags = await manager.getRepository(Tag).find({
-      where: { id: In(tagIds.map((id) => String(id))) },
+    const ids = tagIds.map((value) => this.ensureNumericId(value));
+    const tags = await this.prisma.tag.findMany({
+      where: { id: { in: ids } },
+      select: { id: true },
     });
 
-    if (tags.length !== tagIds.length) {
+    if (tags.length !== ids.length) {
       throw new BadRequestException('One or more tags do not exist');
     }
 
-    return tags;
+    return ids;
   }
 
-  private async resolveSuppliers(
-    manager: EntityManager,
-    supplierIds: Array<number | string> | undefined,
+  private async resolveSupplierIds(
+    supplierIds: Array<string> | undefined,
     currentUser?: CurrentUserPayload,
-  ): Promise<User[]> {
+  ): Promise<string[]> {
     if (supplierIds === undefined) {
       if (!currentUser) {
         throw new BadRequestException('Suppliers are required');
       }
 
       if (isSupplier(currentUser)) {
-        return [await this.requireSupplierRecord(manager, currentUser.id)];
+        await this.ensureSupplierExists(currentUser.id);
+        return [currentUser.id];
       }
 
       if (isAdmin(currentUser)) {
@@ -571,30 +641,35 @@ export class ProductsService {
       return [];
     }
 
-    const suppliers = await manager.getRepository(User).find({
-      where: { id: In(supplierIds.map((id) => String(id))) },
+    const unique = Array.from(new Set(supplierIds));
+    const suppliers = await this.prisma.user.findMany({
+      where: { id: { in: unique } },
+      select: { id: true },
     });
 
-    if (suppliers.length !== supplierIds.length) {
+    if (suppliers.length !== unique.length) {
       throw new BadRequestException('One or more suppliers do not exist');
     }
 
-    return suppliers;
+    return unique;
   }
 
-  private async requireSupplierRecord(
-    manager: EntityManager,
-    userId: string,
-  ): Promise<User> {
-    const supplier = await manager.getRepository(User).findOne({
+  private async ensureSupplierExists(userId: string): Promise<void> {
+    const exists = await this.prisma.user.findUnique({
       where: { id: userId },
+      select: { id: true },
     });
-    if (!supplier) {
+
+    if (!exists) {
       throw new BadRequestException('Supplier does not exist');
     }
-    return supplier;
+  }
+
+  private ensureNumericId(value: number | string): bigint {
+    const asString = String(value);
+    if (!/^\d+$/.test(asString)) {
+      throw new BadRequestException('Identifier must be numeric');
+    }
+    return BigInt(asString);
   }
 }
-
-
-

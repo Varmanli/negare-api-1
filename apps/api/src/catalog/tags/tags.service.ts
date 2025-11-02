@@ -3,66 +3,91 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
-import { Tag } from '../entities/content/tag.entity';
+import type { Prisma as PrismaNamespace } from '@prisma/client';
+import { Prisma } from '@app/prisma/prisma.constants';
+import { PrismaService } from '@app/prisma/prisma.service';
 import { CreateTagDto } from './dtos/create-tag.dto';
 import { UpdateTagDto } from './dtos/update-tag.dto';
 import { buildUniqueSlugCandidate, slugify } from '../utils/slug.util';
+import { TagResponseDto } from './dtos/tag-response.dto';
+
+const tagSelect = Prisma.validator<PrismaNamespace.TagSelect>()({
+  id: true,
+  name: true,
+  slug: true,
+});
+
+type TagRecord = PrismaNamespace.TagGetPayload<{ select: typeof tagSelect }>;
 
 @Injectable()
 export class TagsService {
   private readonly slugMaxAttempts = 10;
 
-  constructor(
-    @InjectRepository(Tag)
-    private readonly tagsRepository: Repository<Tag>,
-  ) {}
+  constructor(private readonly prisma: PrismaService) {}
 
-  async findAll(): Promise<Tag[]> {
-    return this.tagsRepository.find({ order: { name: 'ASC' } });
+  async findAll(): Promise<TagResponseDto[]> {
+    const tags = await this.prisma.tag.findMany({
+      select: tagSelect,
+      orderBy: { name: 'asc' },
+    });
+    return tags.map((tag) => this.mapTag(tag));
   }
 
-  async create(dto: CreateTagDto): Promise<Tag> {
+  async create(dto: CreateTagDto): Promise<TagResponseDto> {
     const slug = await this.resolveUniqueSlug(dto.slug ?? slugify(dto.name));
 
-    const entity = this.tagsRepository.create({
-      name: dto.name,
-      slug,
+    const created = await this.prisma.tag.create({
+      data: {
+        name: dto.name,
+        slug,
+      },
+      select: tagSelect,
     });
 
-    return this.tagsRepository.save(entity);
+    return this.mapTag(created);
   }
 
-  async update(id: string, dto: UpdateTagDto): Promise<Tag> {
-    const tag = await this.findTagOrThrow(id);
+  async update(id: string, dto: UpdateTagDto): Promise<TagResponseDto> {
+    const numericId = BigInt(id);
+    await this.ensureTagExists(numericId);
+
+    const data: PrismaNamespace.TagUpdateInput = {};
 
     if (dto.name !== undefined) {
-      tag.name = dto.name;
+      data.name = dto.name;
     }
 
     if (dto.slug !== undefined) {
-      tag.slug = await this.resolveUniqueSlug(dto.slug, id);
+      data.slug = await this.resolveUniqueSlug(dto.slug, id);
     } else if (dto.name) {
-      tag.slug = await this.resolveUniqueSlug(slugify(dto.name), id);
+      data.slug = await this.resolveUniqueSlug(slugify(dto.name), id);
     }
 
-    return this.tagsRepository.save(tag);
+    const updated = await this.prisma.tag.update({
+      where: { id: numericId },
+      data,
+      select: tagSelect,
+    });
+
+    return this.mapTag(updated);
   }
 
   async remove(id: string): Promise<void> {
-    const result = await this.tagsRepository.delete(id);
-    if (!result.affected) {
+    const numericId = BigInt(id);
+    const result = await this.prisma.tag.deleteMany({ where: { id: numericId } });
+    if (result.count === 0) {
       throw new NotFoundException('Tag not found');
     }
   }
 
-  private async findTagOrThrow(id: string): Promise<Tag> {
-    const tag = await this.tagsRepository.findOne({ where: { id } });
-    if (!tag) {
+  private async ensureTagExists(id: bigint): Promise<void> {
+    const exists = await this.prisma.tag.findUnique({
+      where: { id },
+      select: { id: true },
+    });
+    if (!exists) {
       throw new NotFoundException('Tag not found');
     }
-    return tag;
   }
 
   private async resolveUniqueSlug(base: string, ignoreId?: string): Promise<string> {
@@ -72,15 +97,24 @@ export class TagsService {
 
     for (let attempt = 0; attempt < this.slugMaxAttempts; attempt += 1) {
       const candidate = buildUniqueSlugCandidate(base, attempt);
-      const existing = await this.tagsRepository.findOne({
+      const existing = await this.prisma.tag.findUnique({
         where: { slug: candidate },
+        select: { id: true },
       });
 
-      if (!existing || (ignoreId && existing.id === ignoreId)) {
+      if (!existing || (ignoreId && existing.id.toString() === ignoreId)) {
         return candidate;
       }
     }
 
     throw new BadRequestException('Unable to generate unique tag slug');
+  }
+
+  private mapTag(tag: TagRecord): TagResponseDto {
+    const dto = new TagResponseDto();
+    dto.id = tag.id.toString();
+    dto.name = tag.name;
+    dto.slug = tag.slug;
+    return dto;
   }
 }

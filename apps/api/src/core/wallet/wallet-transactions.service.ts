@@ -1,100 +1,137 @@
 import { Injectable } from '@nestjs/common';
-import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, SelectQueryBuilder } from 'typeorm';
+import type { Prisma as PrismaNamespace, WalletTransaction } from '@prisma/client';
+import { Prisma } from '@app/prisma/prisma.constants';
+import { PrismaService } from '@app/prisma/prisma.service';
 import { FindWalletTransactionsQueryDto } from './dto/find-wallet-transactions-query.dto';
-import { WalletTransaction } from './wallet-transaction.entity';
 
 @Injectable()
 export class WalletTransactionsService {
-  constructor(
-    @InjectRepository(WalletTransaction)
-    private readonly walletTransactionsRepository: Repository<WalletTransaction>,
-  ) {}
+  constructor(private readonly prisma: PrismaService) {}
 
-  async findAll(
-    query: FindWalletTransactionsQueryDto,
-  ): Promise<WalletTransaction[]> {
-    const qb = this.createBaseQuery(query);
-    return qb.getMany();
+  findAll(query: FindWalletTransactionsQueryDto): Promise<WalletTransaction[]> {
+    return this.queryTransactions(query);
   }
 
-  async findByWallet(
+  findByWallet(
     walletId: string,
     query: FindWalletTransactionsQueryDto,
   ): Promise<WalletTransaction[]> {
-    return this.createBaseQuery(query)
-      .andWhere('transaction.walletId = :walletId', { walletId })
-      .getMany();
+    return this.queryTransactions({ ...query, walletId });
   }
 
   findById(id: string): Promise<WalletTransaction | null> {
-    return this.walletTransactionsRepository.findOne({
+    return this.prisma.walletTransaction.findUnique({
       where: { id },
-      relations: { wallet: true, user: true },
+      include: {
+        wallet: true,
+        user: true,
+      },
     });
   }
 
   findByIdempotencyKey(
     idempotencyKey: string,
   ): Promise<WalletTransaction | null> {
-    return this.walletTransactionsRepository.findOne({
+    return this.prisma.walletTransaction.findFirst({
       where: { idempotencyKey },
-      relations: { wallet: true, user: true },
+      include: {
+        wallet: true,
+        user: true,
+      },
     });
   }
 
-  private createBaseQuery(
+  private async queryTransactions(
     query: FindWalletTransactionsQueryDto,
-  ): SelectQueryBuilder<WalletTransaction> {
-    const qb = this.walletTransactionsRepository
-      .createQueryBuilder('transaction')
-      .leftJoinAndSelect('transaction.wallet', 'wallet')
-      .leftJoinAndSelect('transaction.user', 'user')
-      .orderBy('transaction.createdAt', 'DESC')
-      .take(query.limit ?? 25);
-
-    if (query.cursor) {
-      qb.andWhere('transaction.id < :cursor', { cursor: query.cursor });
-    }
+  ): Promise<WalletTransaction[]> {
+    const take = Math.min(Math.max(query.limit ?? 25, 1), 100);
+    const where: PrismaNamespace.WalletTransactionWhereInput = {};
 
     if (query.userId) {
-      qb.andWhere('transaction.userId = :userId', {
-        userId: query.userId,
-      });
+      where.userId = query.userId;
     }
 
     if (query.walletId) {
-      qb.andWhere('transaction.walletId = :walletId', {
-        walletId: query.walletId,
-      });
+      where.walletId = query.walletId;
     }
 
     if (query.type) {
-      qb.andWhere('transaction.type = :type', { type: query.type });
+      where.type = query.type;
     }
 
     if (query.status) {
-      qb.andWhere('transaction.status = :status', { status: query.status });
+      where.status = query.status;
     }
 
     if (query.refType) {
-      qb.andWhere('transaction.refType = :refType', {
-        refType: query.refType,
-      });
+      where.refType = query.refType;
     }
 
+    const mergeCreatedAtFilter = (
+      existing: PrismaNamespace.WalletTransactionWhereInput['createdAt'],
+      patch: PrismaNamespace.DateTimeFilter,
+    ): PrismaNamespace.DateTimeFilter => {
+      if (
+        existing &&
+        typeof existing === 'object' &&
+        !Array.isArray(existing)
+      ) {
+        return { ...(existing as PrismaNamespace.DateTimeFilter), ...patch };
+      }
+      return { ...patch };
+    };
+
     if (query.from) {
-      qb.andWhere('transaction.createdAt >= :from', {
-        from: query.from,
-      });
+      const fromDate = new Date(query.from);
+      if (!Number.isNaN(fromDate.getTime())) {
+        where.createdAt = mergeCreatedAtFilter(where.createdAt, { gte: fromDate });
+      }
     }
 
     if (query.to) {
-      qb.andWhere('transaction.createdAt <= :to', {
-        to: query.to,
-      });
+      const toDate = new Date(query.to);
+      if (!Number.isNaN(toDate.getTime())) {
+        where.createdAt = mergeCreatedAtFilter(where.createdAt, { lte: toDate });
+      }
     }
 
-    return qb;
+    const andConditions: PrismaNamespace.WalletTransactionWhereInput[] = [];
+
+    if (query.cursor) {
+      const cursorEntity = await this.prisma.walletTransaction.findUnique({
+        where: { id: query.cursor },
+        select: { createdAt: true, id: true },
+      });
+
+      if (cursorEntity) {
+        andConditions.push({
+          OR: [
+            { createdAt: { lt: cursorEntity.createdAt } },
+            {
+              createdAt: cursorEntity.createdAt,
+              id: { lt: cursorEntity.id },
+            },
+          ],
+        });
+      }
+    }
+
+    const finalWhere =
+      andConditions.length > 0
+        ? { AND: [where, ...andConditions] }
+        : where;
+
+    return this.prisma.walletTransaction.findMany({
+      where: finalWhere,
+      include: {
+        wallet: true,
+        user: true,
+      },
+      orderBy: [
+        { createdAt: 'desc' },
+        { id: 'desc' },
+      ],
+      take,
+    });
   }
 }

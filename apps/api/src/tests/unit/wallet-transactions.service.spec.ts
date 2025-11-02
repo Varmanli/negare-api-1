@@ -1,83 +1,65 @@
-import { DataSource } from 'typeorm';
-import { ConfigService } from '@nestjs/config';
-import { createTestDataSource } from '../../tests/utils/test-database.util';
-import { WalletTransactionsService } from '../../core/wallet-transactions/wallet-transactions.service';
+import { WalletTransactionRefType, WalletTransactionType } from '@app/prisma/prisma.constants';
+import { WalletTransactionsService } from '@app/core/wallet/wallet-transactions.service';
 import { WalletsService } from '@app/core/wallet/wallets.service';
-import { UsersService } from '@app/core/users/users.service';
-import { User } from '@app/core/users/user.entity';
-import { UserRole } from '@app/core/roles/entities/role.entity';
-import { Role } from '@app/core/roles/entities/role.entity';
-import { Wallet } from '@app/core/wallet/wallet.entity';
-import {
-  WalletTransaction,
-  WalletTransactionRefType,
-  WalletTransactionType,
-} from '../../core/wallet-transactions/wallet-transaction.entity';
+import { ConfigService } from '@nestjs/config';
 import { WalletAuditService } from '@app/core/wallet/wallet-audit.service';
 import { WalletRateLimitService } from '@app/core/wallet/wallet-rate-limit.service';
+import {
+  createWalletPrismaStub,
+  WalletPrismaStub,
+} from '../utils/prisma-wallet.stub';
+
+const userId = 'user-1';
+
+const configStub = {
+  get: () => 'test',
+} as unknown as ConfigService;
+
+const auditStub = {
+  log: jest.fn(),
+} as unknown as WalletAuditService;
+
+const rateLimitStub = {
+  consume: jest.fn(),
+} as unknown as WalletRateLimitService;
 
 describe('WalletTransactionsService', () => {
-  let dataSource: DataSource;
-  let service: WalletTransactionsService;
+  let prisma: WalletPrismaStub;
   let walletsService: WalletsService;
-  let usersService: UsersService;
-  let user: User;
+  let service: WalletTransactionsService;
 
   beforeEach(async () => {
-    dataSource = await createTestDataSource({
-      entities: [User, UserRole, Role, Wallet, WalletTransaction],
-    });
-    service = new WalletTransactionsService(
-      dataSource.getRepository(WalletTransaction),
-    );
-    const configStub = {
-      get: () => undefined,
-    } as unknown as ConfigService;
-    const auditStub = {
-      log: async () => undefined,
-    } as unknown as WalletAuditService;
-    const rateLimitStub = {
-      consume: async () => undefined,
-    } as unknown as WalletRateLimitService;
-
+    prisma = createWalletPrismaStub();
+    await prisma.user.upsert({ where: { id: userId }, create: { id: userId } });
     walletsService = new WalletsService(
-      dataSource.getRepository(Wallet),
-      dataSource.getRepository(WalletTransaction),
-      dataSource,
+      prisma as any,
       configStub,
       auditStub,
       rateLimitStub,
     );
-    usersService = new UsersService(dataSource.getRepository(User));
-
-    user = await usersService.create({
-      username: `transactions_user_${Date.now()}`,
-      email: 'transactions@example.com',
-    });
-    await walletsService.createForUser(user.id);
+    service = new WalletTransactionsService(prisma as any);
+    await walletsService.createForUser(userId, {});
   });
 
-  afterEach(async () => {
-    if (dataSource?.isInitialized) {
-      await dataSource.destroy();
-    }
+  afterEach(() => {
+    jest.clearAllMocks();
   });
 
   it('filters transactions by user and type', async () => {
-    const creditTx = await walletsService.credit(user.id, {
+    const creditTx = await walletsService.credit(userId, {
       amount: '7000',
       idempotencyKey: 'tx-credit-1',
       refType: WalletTransactionRefType.ORDER,
     });
 
-    await walletsService.debit(user.id, {
+    await walletsService.debit(userId, {
       amount: '2000',
       idempotencyKey: 'tx-debit-1',
       refType: WalletTransactionRefType.PAYOUT,
     });
 
     const result = await service.findAll({
-      userId: user.id,
+      userId,
       type: WalletTransactionType.CREDIT,
       limit: 10,
     });
@@ -87,13 +69,13 @@ describe('WalletTransactionsService', () => {
   });
 
   it('returns transactions scoped by wallet id', async () => {
-    await walletsService.credit(user.id, {
+    await walletsService.credit(userId, {
       amount: '5000',
       idempotencyKey: 'tx-credit-2',
       refType: WalletTransactionRefType.ADJUSTMENT,
     });
 
-    const wallet = await walletsService.findByUserId(user.id);
+    const wallet = await walletsService.findByUserId(userId);
     const transactions = await service.findByWallet(wallet!.id, {
       limit: 5,
     });
@@ -103,7 +85,7 @@ describe('WalletTransactionsService', () => {
   });
 
   it('finds transactions by id and idempotency key', async () => {
-    const tx = await walletsService.credit(user.id, {
+    const tx = await walletsService.credit(userId, {
       amount: '3000',
       idempotencyKey: 'tx-credit-3',
       refType: WalletTransactionRefType.ORDER,
@@ -113,12 +95,12 @@ describe('WalletTransactionsService', () => {
     const byKey = await service.findByIdempotencyKey('tx-credit-3');
 
     expect(byId?.id).toEqual(tx.id);
-    expect(byId?.userId).toEqual(user.id);
+    expect(byId?.userId).toEqual(userId);
     expect(byKey?.id).toEqual(tx.id);
   });
 
   it('supports date range filtering', async () => {
-    await walletsService.credit(user.id, {
+    await walletsService.credit(userId, {
       amount: '1000',
       idempotencyKey: 'tx-credit-4',
       refType: WalletTransactionRefType.ORDER,
@@ -127,7 +109,7 @@ describe('WalletTransactionsService', () => {
     const from = new Date(Date.now() + 1000).toISOString();
 
     const filtered = await service.findAll({
-      userId: user.id,
+      userId,
       from,
     });
 

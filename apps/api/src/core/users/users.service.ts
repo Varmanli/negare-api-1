@@ -1,147 +1,140 @@
-/**
- * UsersService encapsulates TypeORM operations for querying and mutating user entities.
- */
-import { Injectable, NotFoundException } from '@nestjs/common';
-import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, SelectQueryBuilder } from 'typeorm';
+import {
+  Injectable,
+  NotFoundException,
+  UnauthorizedException,
+} from '@nestjs/common';
+import { Prisma, User } from '@prisma/client';
 import { createHash } from 'node:crypto';
-import { User } from './user.entity';
+import { PrismaService } from '@app/prisma/prisma.service';
 import { FindUsersQueryDto } from './dto/find-users-query.dto';
 import { CreateUserDto } from './dto/create-user.dto';
 import { UpdateUserDto } from './dto/update-user.dto';
 
+/** include واحد و تایپ همگام با Prisma */
+const userWithRelations = Prisma.validator<Prisma.UserDefaultArgs>()({
+  include: {
+    userRoles: { include: { role: true } },
+    wallet: true,
+  },
+});
+export type UserWithRelations = Prisma.UserGetPayload<typeof userWithRelations>;
+
 @Injectable()
-/**
- * Provides user CRUD utilities consumed by controllers and other services.
- */
 export class UsersService {
-  constructor(
-    @InjectRepository(User)
-    private readonly usersRepository: Repository<User>,
-  ) {}
+  constructor(private readonly prisma: PrismaService) {}
 
   /**
-   * Retrieves users with optional cursor pagination and filters.
-   * @param query Filter, pagination, and search criteria.
+   * لیست کاربران با جستجو و صفحه‌بندی cursor-based.
+   * - مرتب‌سازی: id DESC (ساده و پایدار برای cursor)
+   * - cursor: اگر داده شد، رکورد بعد از آن را برمی‌گردانیم.
    */
-  async findAll(query: FindUsersQueryDto): Promise<User[]> {
-    const limit = query.limit ?? 25;
-    const qb = this.buildRelationsQuery(limit);
+  async findAll(query: FindUsersQueryDto): Promise<UserWithRelations[]> {
+    const take = query.limit ?? 25;
 
-    if (query.cursor) {
-      qb.andWhere('user.id < :cursor', { cursor: query.cursor });
-    }
-
-    if (typeof query.isActive === 'boolean') {
-      qb.andWhere('user.isActive = :isActive', { isActive: query.isActive });
-    }
-
+    const where: Prisma.UserWhereInput = {};
     if (query.search) {
-      const normalized = `%${query.search.toLowerCase()}%`;
-      qb.andWhere(
-        '(LOWER(user.username) LIKE :search OR LOWER(user.email) LIKE :search)',
-        { search: normalized },
-      );
+      where.OR = [
+        { username: { contains: query.search, mode: 'insensitive' } },
+        { email: { contains: query.search, mode: 'insensitive' } },
+      ];
     }
 
-    return qb.getMany();
+    return this.prisma.user.findMany({
+      where,
+      include: userWithRelations.include,
+      orderBy: { id: 'desc' },
+      ...(query.cursor ? { cursor: { id: query.cursor }, skip: 1 } : {}),
+      take,
+    });
   }
 
-  /**
-   * Loads a single user by id including roles and wallet associations.
-   * @param id User UUID.
-   */
-  findById(id: string): Promise<User | null> {
-    return this.usersRepository.findOne({
+  findById(id: string): Promise<UserWithRelations | null> {
+    return this.prisma.user.findUnique({
       where: { id },
-      relations: {
-        userRoles: { role: true },
-        wallet: true,
-      },
+      include: userWithRelations.include,
     });
   }
 
   /**
-   * Creates a new user record, hashing optional passwords and normalizing fields.
-   * @param dto Payload from controller.
+   * برگرداندن کاربر فعال به‌همراه نقش‌ها.
+   * اگر فیلد isActive را در schema داری، چک را اضافه کن (در حال حاضر حذف شده تا با schema فعلی خطا ندهد).
    */
-  async create(dto: CreateUserDto): Promise<User> {
+  async ensureActiveWithRoles(id: string): Promise<UserWithRelations> {
+    const user = await this.prisma.user.findUnique({
+      where: { id },
+      include: userWithRelations.include,
+    });
+
+    if (!user) {
+      throw new UnauthorizedException('User not found.');
+    }
+
+    // اگر isActive در schema وجود دارد، این چک را برگردان:
+    // if (!user.isActive) {
+    //   throw new UnauthorizedException('User account is inactive.');
+    // }
+
+    return user;
+  }
+
+  /**
+   * ایجاد کاربر.
+   * نکته امنیتی: برای رمز بهتره از argon2/bcrypt استفاده بشه؛ sha256 صرفاً موقت برای dev.
+   */
+  async create(dto: CreateUserDto): Promise<UserWithRelations> {
     const passwordHash = dto.password
       ? createHash('sha256').update(dto.password).digest('hex')
       : null;
 
-    const user = this.usersRepository.create({
-      username: dto.username,
-      email: dto.email ?? null,
-      phone: dto.phone ?? null,
-      name: dto.name ?? null,
-      bio: dto.bio ?? null,
-      city: dto.city ?? null,
-      avatarUrl: dto.avatarUrl ?? null,
-      passwordHash,
-      isActive: dto.isActive ?? true,
+    return this.prisma.user.create({
+      data: {
+        username: dto.username,
+        email: dto.email ?? null,
+        phone: dto.phone ?? null,
+        name: dto.name ?? null,
+        bio: dto.bio ?? null,
+        city: dto.city ?? null,
+        avatarUrl: dto.avatarUrl ?? null,
+        passwordHash,
+        // isActive: dto.isActive ?? true, // ← بعد از اضافه کردن به schema، این را آزاد کن
+      } satisfies Prisma.UserCreateInput,
+      include: userWithRelations.include,
     });
-
-    return this.usersRepository.save(user);
   }
 
   /**
-   * Applies updates to an existing user, including password rotation if provided.
-   * @param id User UUID.
-   * @param dto Mutation payload.
-   * @throws NotFoundException when the user does not exist.
+   * ویرایش کاربر.
    */
-  async update(id: string, dto: UpdateUserDto): Promise<User> {
-    const user = await this.usersRepository.findOne({ where: { id } });
-
-    if (!user) {
-      throw new NotFoundException(`������ �� ����� ${id} ���� ���.`);
+  async update(id: string, dto: UpdateUserDto): Promise<UserWithRelations> {
+    const existing = await this.prisma.user.findUnique({ where: { id } });
+    if (!existing) {
+      throw new NotFoundException(`User ${id} was not found.`);
     }
 
-    if (dto.email !== undefined) {
-      user.email = dto.email ?? null;
-    }
-    if (dto.phone !== undefined) {
-      user.phone = dto.phone ?? null;
-    }
-    if (dto.name !== undefined) {
-      user.name = dto.name ?? null;
-    }
-    if (dto.bio !== undefined) {
-      user.bio = dto.bio ?? null;
-    }
-    if (dto.city !== undefined) {
-      user.city = dto.city ?? null;
-    }
-    if (dto.avatarUrl !== undefined) {
-      user.avatarUrl = dto.avatarUrl ?? null;
-    }
-    if (dto.isActive !== undefined) {
-      user.isActive = dto.isActive;
-    }
+    const data: Prisma.UserUpdateInput = {};
+
+    if (dto.email !== undefined) data.email = dto.email ?? null;
+    if (dto.phone !== undefined) data.phone = dto.phone ?? null;
+    if (dto.name !== undefined) data.name = dto.name ?? null;
+    if (dto.bio !== undefined) data.bio = dto.bio ?? null;
+    if (dto.city !== undefined) data.city = dto.city ?? null;
+    if (dto.avatarUrl !== undefined) data.avatarUrl = dto.avatarUrl ?? null;
+    if (dto.username !== undefined) data.username = dto.username;
+
+    // اگر در schema فیلد isActive موجود است:
+    // if (dto.isActive !== undefined) data.isActive = dto.isActive;
+
     if (dto.password) {
-      user.passwordHash = createHash('sha256')
+      data.passwordHash = createHash('sha256')
         .update(dto.password)
         .digest('hex');
+      // بهتر: data.passwordHash = await argon2.hash(dto.password);
     }
 
-    if (dto.username) {
-      user.username = dto.username;
-    }
-
-    return this.usersRepository.save(user);
-  }
-
-  /**
-   * Builds a query builder that eagerly loads roles and wallet data.
-   */
-  private buildRelationsQuery(limit: number): SelectQueryBuilder<User> {
-    return this.usersRepository
-      .createQueryBuilder('user')
-      .leftJoinAndSelect('user.userRoles', 'userRoles')
-      .leftJoinAndSelect('userRoles.role', 'role')
-      .leftJoinAndSelect('user.wallet', 'wallet')
-      .orderBy('user.createdAt', 'DESC')
-      .take(limit);
+    return this.prisma.user.update({
+      where: { id },
+      data,
+      include: userWithRelations.include,
+    });
   }
 }

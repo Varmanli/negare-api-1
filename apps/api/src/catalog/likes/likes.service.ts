@@ -1,117 +1,109 @@
 import {
   BadRequestException,
   Injectable,
-  InternalServerErrorException,
   NotFoundException,
 } from '@nestjs/common';
-import { InjectRepository } from '@nestjs/typeorm';
+import type { Prisma as PrismaNamespace } from '@prisma/client';
+import { Prisma, PrismaClientKnownRequestError } from '@app/prisma/prisma.constants';
+import { PrismaService } from '@app/prisma/prisma.service';
 import {
-  DataSource,
-  EntityManager,
-  QueryFailedError,
-  Repository,
-  SelectQueryBuilder,
-} from 'typeorm';
-import { Like } from '../entities/content/like.entity';
-import { Product } from '../entities/content/product.entity';
+  clampPagination,
+  PaginationResult,
+  toPaginationResult,
+} from '../utils/pagination.util';
 import { ListQueryDto } from '../dtos/list-query.dto';
-import { paginate, PaginationResult } from '../utils/pagination.util';
+import {
+  mapProduct,
+  productWithRelations,
+  ProductWithRelations,
+} from '../products/product.mapper';
+import { ProductResponseDto } from '../products/dtos/product-response.dto';
 
 export interface ToggleLikeResult {
   liked: boolean;
   likesCount: number;
 }
 
+const likeInclude = Prisma.validator<PrismaNamespace.LikeInclude>()({
+  product: productWithRelations,
+});
+
+type LikeWithProduct = PrismaNamespace.LikeGetPayload<{
+  include: typeof likeInclude;
+}>;
+
 @Injectable()
 export class LikesService {
-  constructor(
-    private readonly dataSource: DataSource,
-    @InjectRepository(Like)
-    private readonly likesRepository: Repository<Like>,
-    @InjectRepository(Product)
-    private readonly productsRepository: Repository<Product>,
-  ) {}
+  constructor(private readonly prisma: PrismaService) {}
 
   async toggleLike(
     userId: string,
     productId: string,
     desiredState?: boolean,
   ): Promise<ToggleLikeResult> {
-    this.ensureNumericId(productId);
+    const numericId = this.ensureNumericId(productId);
 
-    return this.dataSource.transaction(async (manager) => {
-      let product: Product | null = null;
-      try {
-        product = await manager
-          .getRepository(Product)
-          .createQueryBuilder('product')
-          .setLock('pessimistic_write')
-          .where('product.id = :productId', { productId })
-          .getOne();
-      } catch (error) {
-        if (this.shouldRetryWithoutLock(error)) {
-          product = await manager.getRepository(Product).findOne({
-            where: { id: productId },
-          });
-        } else {
-          throw error;
+    return this.prisma.$transaction(
+      async (tx) => {
+        const product = await tx.product.findUnique({
+          where: { id: numericId },
+          select: { id: true },
+        });
+
+        if (!product) {
+          throw new NotFoundException('Product not found');
         }
-      }
 
-      if (!product) {
-        throw new NotFoundException('Product not found');
-      }
+        const likeWhere: PrismaNamespace.LikeWhereUniqueInput = {
+          userId_productId: { userId, productId: numericId },
+        };
 
-      const likesRepo = manager.getRepository(Like);
-      const existing = await likesRepo.findOne({
-        where: { userId, productId },
-      });
+        const existing = await tx.like.findUnique({ where: likeWhere });
 
-      let liked: boolean;
+        let liked: boolean;
 
-      if (desiredState === undefined) {
-        liked = !existing;
-        if (existing) {
-          const removed = await likesRepo.delete({ userId, productId });
-          if ((removed.affected ?? 0) > 0) {
-            await this.adjustLikesCount(manager, productId, -1);
+        if (desiredState === undefined) {
+          liked = !existing;
+          if (existing) {
+            await tx.like.delete({ where: likeWhere });
+            await this.adjustLikesCount(tx, numericId, -1);
+          } else {
+            await this.createLike(tx, userId, numericId);
+            await this.adjustLikesCount(tx, numericId, 1);
+          }
+        } else if (desiredState) {
+          liked = true;
+          if (!existing) {
+            await this.createLike(tx, userId, numericId);
+            await this.adjustLikesCount(tx, numericId, 1);
           }
         } else {
-          const inserted = await this.insertLike(likesRepo, userId, productId);
-          if (inserted) {
-            await this.adjustLikesCount(manager, productId, 1);
+          liked = false;
+          if (existing) {
+            await tx.like.delete({ where: likeWhere });
+            await this.adjustLikesCount(tx, numericId, -1);
           }
         }
-      } else if (desiredState) {
-        liked = true;
-        if (!existing) {
-          const inserted = await this.insertLike(likesRepo, userId, productId);
-          if (inserted) {
-            await this.adjustLikesCount(manager, productId, 1);
-          }
-        }
-      } else {
-        liked = false;
-        if (existing) {
-          const removed = await likesRepo.delete({ userId, productId });
-          if ((removed.affected ?? 0) > 0) {
-            await this.adjustLikesCount(manager, productId, -1);
-          }
-        }
-      }
 
-      const likesCount = await this.getLikesCount(manager, productId);
+        const refreshed = await tx.product.findUnique({
+          where: { id: numericId },
+          select: { likesCount: true },
+        });
 
-      return { liked, likesCount };
-    });
+        return {
+          liked,
+          likesCount: refreshed?.likesCount ?? 0,
+        };
+      },
+      { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
+    );
   }
 
   async isProductLiked(userId: string, productId: string): Promise<boolean> {
-    this.ensureNumericId(productId);
-
-    const like = await this.likesRepository.findOne({
-      where: { userId, productId },
-      select: ['userId', 'productId'],
+    const numericId = this.ensureNumericId(productId);
+    const like = await this.prisma.like.findUnique({
+      where: { userId_productId: { userId, productId: numericId } },
+      select: { userId: true },
     });
     return Boolean(like);
   }
@@ -119,131 +111,97 @@ export class LikesService {
   async listLikedProducts(
     userId: string,
     query: ListQueryDto,
-  ): Promise<PaginationResult<Product>> {
-    const { page, limit } = this.resolvePagination(query);
-    const qb = this.buildLikedProductsQuery(userId);
+  ): Promise<PaginationResult<ProductResponseDto>> {
+    const { page, limit, skip } = clampPagination(query.page, query.limit);
 
-    return paginate(qb, page, limit);
+    const [total, likes] = (await this.prisma.$transaction([
+      this.prisma.like.count({ where: { userId } }),
+      this.prisma.like.findMany({
+        where: { userId },
+        orderBy: [
+          { createdAt: 'desc' },
+          { productId: 'desc' },
+        ],
+        skip,
+        take: limit,
+        include: likeInclude,
+      }),
+    ])) as [number, LikeWithProduct[]];
+
+    const data = likes
+      .map((like) => like.product)
+      .filter((product): product is ProductWithRelations => Boolean(product))
+      .map((product) => Object.assign(mapProduct(product), { liked: true }));
+
+    return toPaginationResult(data, total, page, limit);
   }
 
-  private buildLikedProductsQuery(userId: string): SelectQueryBuilder<Product> {
-    return this.productsRepository
-      .createQueryBuilder('product')
-      .innerJoin(
-        Like,
-        'like',
-        'like.productId = product.id AND like.userId = :userId',
-        { userId },
-      )
-      .leftJoinAndSelect('product.categories', 'categories')
-      .leftJoinAndSelect('product.tags', 'tags')
-      .leftJoinAndSelect('product.suppliers', 'suppliers')
-      .leftJoinAndSelect('product.assets', 'assets')
-      .addSelect('like.createdAt', 'like_createdAt')
-      .orderBy('like.createdAt', 'DESC')
-      .addOrderBy('product.id', 'DESC');
-  }
-
-  private resolvePagination(query: ListQueryDto): {
-    page: number;
-    limit: number;
-  } {
-    const page = query.page ?? 1;
-    const limit = Math.min(query.limit ?? 24, 100);
-    return { page, limit };
-  }
-
-  private ensureNumericId(productId: string): void {
+  private ensureNumericId(productId: string): bigint {
     if (!/^\d+$/.test(productId)) {
       throw new BadRequestException('Product id must be numeric');
+    }
+    return BigInt(productId);
+  }
+
+  private async createLike(
+    tx: PrismaNamespace.TransactionClient,
+    userId: string,
+    productId: bigint,
+  ): Promise<void> {
+    try {
+      await tx.like.create({
+        data: {
+          userId,
+          productId,
+        },
+      });
+    } catch (error) {
+      if (
+        error instanceof PrismaClientKnownRequestError &&
+        error.code === 'P2002'
+      ) {
+        return;
+      }
+      throw error;
     }
   }
 
   private async adjustLikesCount(
-    manager: EntityManager,
-    productId: string,
+    tx: PrismaNamespace.TransactionClient,
+    productId: bigint,
     delta: number,
   ): Promise<void> {
-    const columnMeta =
-      this.productsRepository.metadata.findColumnWithPropertyName('likesCount');
-
-    if (!columnMeta) {
-      throw new InternalServerErrorException(
-        'Unable to resolve product likesCount metadata',
-      );
-    }
-
-    const databasePath = `"${columnMeta.databasePath}"`;
     if (delta >= 0) {
-      await manager
-        .createQueryBuilder()
-        .update(Product)
-        .set({
-          likesCount: () => `${databasePath} + (${delta})`,
-        })
-        .where('id = :productId', { productId })
-        .execute();
+      const data: PrismaNamespace.ProductUpdateInput = {};
+      (data as Record<string, unknown>).likesCount = { increment: delta };
+      await tx.product.update({
+        where: { id: productId },
+        data,
+      });
       return;
     }
 
-    await manager
-      .createQueryBuilder()
-      .update(Product)
-      .set({
-        likesCount: () => `GREATEST(${databasePath} + (${delta}), 0)`,
-      })
-      .where('id = :productId', { productId })
-      .execute();
-  }
+    const absoluteDelta = Math.abs(delta);
+    const where: PrismaNamespace.ProductWhereInput = { id: productId };
+    (where as Record<string, unknown>).likesCount = { gte: absoluteDelta };
 
-  private async getLikesCount(
-    manager: EntityManager,
-    productId: string,
-  ): Promise<number> {
-    const refreshed = await manager
-      .createQueryBuilder(Product, 'product')
-      .select('product.likesCount', 'likesCount')
-      .where('product.id = :productId', { productId })
-      .getRawOne<{ likesCount: number | string | null }>();
+    const decrementData: PrismaNamespace.ProductUpdateManyMutationInput = {};
+    (decrementData as Record<string, unknown>).likesCount = {
+      decrement: absoluteDelta,
+    };
 
-    if (!refreshed || refreshed.likesCount === undefined || refreshed.likesCount === null) {
-      throw new NotFoundException('Product not found');
+    const updated = await tx.product.updateMany({
+      where,
+      data: decrementData,
+    });
+
+    if (updated.count === 0) {
+      const resetData: PrismaNamespace.ProductUpdateInput = {};
+      (resetData as Record<string, unknown>).likesCount = 0;
+      await tx.product.update({
+        where: { id: productId },
+        data: resetData,
+      });
     }
-
-    const parsed = Number.parseInt(String(refreshed.likesCount), 10);
-    return Number.isNaN(parsed) ? 0 : parsed;
-  }
-
-  private async insertLike(
-    likesRepo: Repository<Like>,
-    userId: string,
-    productId: string,
-  ): Promise<boolean> {
-    try {
-      await likesRepo.insert({ userId, productId });
-      return true;
-    } catch (error) {
-      if (!this.isUniqueViolation(error)) {
-        throw error;
-      }
-      return false;
-    }
-  }
-
-  private isUniqueViolation(error: unknown): boolean {
-    return (
-      error instanceof QueryFailedError &&
-      typeof error.driverError?.code === 'string' &&
-      error.driverError.code === '23505'
-    );
-  }
-
-  private shouldRetryWithoutLock(error: unknown): boolean {
-    if (!(error instanceof QueryFailedError)) {
-      return false;
-    }
-
-    const message = String((error as Error).message).toLowerCase();
-    return message.includes('for update') || message.includes('pessimistic');
   }
 }

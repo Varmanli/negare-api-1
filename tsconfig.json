@@ -21,18 +21,16 @@
     "strictBindCallApply": true,
     "noFallthroughCasesInSwitch": true,
     "noImplicitAny": true,
+    "strictPropertyInitialization": false,
     "paths": {
       "@app/*": ["apps/api/src/*"],
       "@app/common/*": ["apps/api/src/common/*"],
       "@app/core/*": ["apps/api/src/core/*"],
       "@app/catalog/*": ["apps/api/src/catalog/*"],
       "@app/shared/*": ["apps/api/src/shared/*"],
-      "@app/config/*": ["apps/api/src/config/*"]
+      "@app/config/*": ["apps/api/src/config/*"],
+      "@test/*": ["apps/api/test/*"]
     }
   },
-  "include": [
-    "apps/api/src/**/*",
-    "apps/api/test/**/*",
-    "scripts/**/*"
-  ]
+  "include": ["apps/api/src/**/*", "apps/api/test/**/*", "scripts/**/*"]
 }

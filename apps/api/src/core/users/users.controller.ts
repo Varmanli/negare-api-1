@@ -27,7 +27,7 @@ import { FindUsersQueryDto } from './dto/find-users-query.dto';
 import { UpdateUserDto } from './dto/update-user.dto';
 import { UserIdParamDto } from './dto/user-id-param.dto';
 import { UsersService } from './users.service';
-import { RoleName } from '@app/core/roles/entities/role.entity';
+import { RoleName } from '@app/prisma/prisma.constants';
 
 @ApiTags('Users')
 @ApiBearerAuth('bearer')

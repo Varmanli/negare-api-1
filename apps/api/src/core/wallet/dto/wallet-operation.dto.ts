@@ -6,7 +6,8 @@ import {
   Length,
   Matches,
 } from 'class-validator';
-import { WalletTransactionRefType } from '../../wallet-transactions/wallet-transaction.entity';
+import type { Prisma } from '@prisma/client';
+import { WalletTransactionRefType } from '@app/prisma/prisma.constants';
 
 export class WalletOperationDto {
   @ApiProperty({
@@ -42,5 +43,5 @@ export class WalletOperationDto {
 
   @ApiPropertyOptional({ type: Object })
   @IsOptional()
-  metadata?: Record<string, unknown>;
+  metadata?: Prisma.InputJsonValue;
 }

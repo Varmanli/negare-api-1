@@ -1,116 +1,64 @@
-import { DataSource } from 'typeorm';
-import { createTestDataSource } from '../../utils/test-database.util';
-import { BookmarksService } from '../../../catalog/bookmarks/bookmarks.service';
-import { Bookmark } from '../../../catalog/entities/content/bookmark.entity';
-import { Like } from '../../../catalog/entities/content/like.entity';
-import { Product, PricingType } from '../../../catalog/entities/content/product.entity';
-import { User } from '../../../core/users/user.entity';
-import { UserRole } from '@app/core/roles/entities/role.entity';
-import { Role } from '@app/core/roles/entities/role.entity';
-import { Wallet } from '../../../core/wallets/wallet.entity';
-import { WalletTransaction } from '../../../core/wallet-transactions/wallet-transaction.entity';
-import { Category } from '../../../catalog/entities/content/category.entity';
-import { Tag } from '../../../catalog/entities/content/tag.entity';
-import { ProductAsset } from '../../../catalog/entities/content/product-asset.entity';
-import { ProductFile } from '../../../catalog/entities/content/product-file.entity';
+import { BookmarksService } from '@app/catalog/bookmarks/bookmarks.service';
+import { PricingType } from '@app/prisma/prisma.constants';
+import { createCatalogPrismaStub, CatalogPrismaStub } from '../../utils/prisma-catalog.stub';
 
 describe('BookmarksService', () => {
-  let dataSource: DataSource;
+  let prisma: CatalogPrismaStub;
   let service: BookmarksService;
-  let product: Product;
-  let user: User;
+  let baseProductId: bigint;
+  const userId = 'bookmark-user';
 
-  beforeEach(async () => {
-    dataSource = await createTestDataSource({
-      synchronize: false,
-      entities: [
-        Product,
-        ProductAsset,
-        ProductFile,
-        Category,
-        Tag,
-        Bookmark,
-        Like,
-        User,
-        UserRole,
-        Role,
-        Wallet,
-        WalletTransaction,
-      ],
+  beforeEach(() => {
+    prisma = createCatalogPrismaStub();
+    baseProductId = prisma.__createProduct({
+      slug: 'bookmarks-product',
+      pricingType: PricingType.FREE,
+    }).id;
+    prisma.__createProduct({
+      slug: 'bookmarks-product-2',
+      pricingType: PricingType.FREE,
     });
 
-    await dataSource.query('CREATE SCHEMA IF NOT EXISTS "content"');
-    await dataSource.synchronize();
-
-    const usersRepository = dataSource.getRepository(User);
-    user = await usersRepository.save(
-      usersRepository.create({
-        username: 'bookmarks-user',
-        email: null,
-        phone: null,
-        name: 'Bookmarks User',
-        bio: null,
-        city: null,
-        avatarUrl: null,
-        isActive: true,
-      }),
-    );
-
-    const productsRepository = dataSource.getRepository(Product);
-    product = await productsRepository.save({
-      slug: 'bookmarks-product',
-      title: 'Bookmarks Product',
-      pricingType: PricingType.FREE,
-    } as Partial<Product>);
-
-    service = new BookmarksService(
-      dataSource.getRepository(Bookmark),
-      productsRepository,
-    );
+    service = new BookmarksService(prisma as any);
   });
 
-  afterEach(async () => {
-    if (dataSource?.isInitialized) {
-      await dataSource.destroy();
-    }
+  afterEach(() => {
+    jest.clearAllMocks();
   });
 
   it('toggles bookmarks without affecting like counters', async () => {
-    const toggleOn = await service.toggleBookmark(user.id, product.id, undefined);
+    const toggleOn = await service.toggleBookmark(userId, baseProductId.toString(), undefined);
     expect(toggleOn.bookmarked).toBe(true);
 
-    const productAfterBookmark = await dataSource
-      .getRepository(Product)
-      .findOne({ where: { id: product.id } });
-    expect(Number(productAfterBookmark?.likesCount ?? 0)).toBe(0);
+    const productAfter = await prisma.product.findUnique({
+      where: { id: baseProductId },
+      select: { likesCount: true },
+    });
+    expect(productAfter?.likesCount ?? 0).toBe(0);
 
-    const toggleOff = await service.toggleBookmark(user.id, product.id, undefined);
+    const toggleOff = await service.toggleBookmark(userId, baseProductId.toString(), undefined);
     expect(toggleOff.bookmarked).toBe(false);
   });
 
   it('is idempotent when enforcing bookmark state', async () => {
-    await service.toggleBookmark(user.id, product.id, true);
-    const second = await service.toggleBookmark(user.id, product.id, true);
+    await service.toggleBookmark(userId, baseProductId.toString(), true);
+    const second = await service.toggleBookmark(userId, baseProductId.toString(), true);
     expect(second.bookmarked).toBe(true);
 
-    const cleared = await service.toggleBookmark(user.id, product.id, false);
+    const cleared = await service.toggleBookmark(userId, baseProductId.toString(), false);
     expect(cleared.bookmarked).toBe(false);
   });
 
   it('returns bookmarked products ordered by most recent bookmark', async () => {
-    const productsRepository = dataSource.getRepository(Product);
-    const newerProduct = await productsRepository.save({
-      slug: 'bookmarks-product-2',
-      title: 'Bookmarks Product 2',
-      pricingType: PricingType.FREE,
-    } as Partial<Product>);
+    const ids = Array.from(prisma.__products.keys()).map((id) => id.toString());
+    const [firstId, secondId] = ids;
 
-    await service.toggleBookmark(user.id, product.id, true);
-    await service.toggleBookmark(user.id, newerProduct.id, true);
+    await service.toggleBookmark(userId, firstId, true);
+    await service.toggleBookmark(userId, secondId, true);
 
-    const page = await service.listBookmarkedProducts(user.id, { page: 1, limit: 1 });
+    const page = await service.listBookmarkedProducts(userId, { page: 1, limit: 1 });
     expect(page.total).toBe(2);
     expect(page.hasNext).toBe(true);
-    expect(String(page.data[0].id)).toBe(String(newerProduct.id));
+    expect(page.data[0].id).toBe(secondId);
   });
 });

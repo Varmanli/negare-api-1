@@ -1,34 +1,28 @@
 import { INestApplication, ValidationPipe } from '@nestjs/common';
+import { ConfigModule } from '@nestjs/config';
 import { Test, TestingModule } from '@nestjs/testing';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
-import * as request from 'supertest';
+import request from 'supertest';
 import { randomUUID } from 'node:crypto';
 import { newDb } from 'pg-mem';
-import * as pg from 'pg';
-import * as bcrypt from 'bcrypt';
-import * as cookieParser from 'cookie-parser';
+import pg from 'pg';
+import bcrypt from 'bcrypt';
+import cookieParser from 'cookie-parser';
 import { AuthModule } from '@app/core/auth/auth.module';
 import { CoreModule } from '../../core/core.module';
-import { Role } from '@app/core/roles/entities/role.entity';
-import { UserRole } from '@app/core/roles/entities/role.entity';
 import { User } from '@app/core/users/user.entity';
-import { WalletTransaction } from '../../core/wallet-transactions/wallet-transaction.entity';
+import { Role } from '@app/core/roles/entities/role.entity';
+import { UserRole } from '@app/core/roles/entities/user-role.entity';
 import { Wallet } from '@app/core/wallet/wallet.entity';
+import { WalletTransaction } from '@app/core/wallet/wallet-transaction.entity';
 import { NotificationsModule } from '../../notifications/notifications.module';
 import { HttpExceptionFilter } from '@app/common/filters/http-exception.filter';
 import { TracingInterceptor } from '@app/common/interceptors/tracing.interceptor';
 import { TransformResponseInterceptor } from '@app/common/interceptors/transform-response.interceptor';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
-
-process.env.ACCESS_JWT_SECRET ??= 'test-access-secret';
-process.env.REFRESH_JWT_SECRET ??= 'test-refresh-secret';
-process.env.REFRESH_JWT_EXPIRES ??= '30d';
-process.env.MOCK_AUTH_ENABLED ??= 'true';
-process.env.COOKIE_SECURE ??= 'false';
-process.env.COOKIE_SAMESITE ??= 'strict';
-process.env.COOKIE_REFRESH_PATH ??= '/auth/refresh';
+import { authConfig } from '@app/config/auth.config';
 
 describe('CoreModule (e2e)', () => {
   let app: INestApplication;
@@ -67,6 +61,13 @@ describe('CoreModule (e2e)', () => {
 
     const moduleFixture: TestingModule = await Test.createTestingModule({
       imports: [
+        ConfigModule.forRoot({
+          isGlobal: true,
+          cache: true,
+          expandVariables: true,
+          envFilePath: ['.env.test', '.env'],
+          load: [authConfig],
+        }),
         TypeOrmModule.forRootAsync({
           useFactory: async () => ({
             type: 'postgres',
@@ -87,7 +88,12 @@ describe('CoreModule (e2e)', () => {
         NotificationsModule,
         CoreModule,
       ],
-    }).compile();
+    })
+      .overrideProvider('KAVENEGAR_CLIENT')
+      .useValue({ send: jest.fn().mockResolvedValue({ status: 'ok' }) })
+      .overrideProvider('REDIS')
+      .useValue(createInMemoryRedis())
+      .compile();
 
     const nestApp = moduleFixture.createNestApplication();
 
@@ -173,7 +179,93 @@ describe('CoreModule (e2e)', () => {
     };
   }
 
-  it('issues refresh token cookie and supports cookie + body refresh flows', async () => {
+  function findCookie(cookies: string[], name: string): string | undefined {
+    return cookies.find((cookie) => cookie.startsWith(`${name}=`));
+  }
+
+  function joinCookies(...cookies: Array<string | undefined>): string {
+    return cookies
+      .filter(
+        (cookie): cookie is string =>
+          typeof cookie === 'string' && cookie.length > 0,
+      )
+      .join('; ');
+  }
+
+  function createInMemoryRedis() {
+    const store = new Map<string, string>();
+    return {
+      get: jest.fn(async (key: string) => store.get(key) ?? null),
+      set: jest.fn(
+        async (
+          key: string,
+          value: string,
+          _mode?: string,
+          _ttl?: number,
+        ) => {
+          store.set(key, value);
+          return 'OK';
+        },
+      ),
+      del: jest.fn(async (key: string) => (store.delete(key) ? 1 : 0)),
+    };
+  }
+
+  async function loginAs(userId: string, email: string) {
+    await setUserPassword(userId);
+    const response = await request(app.getHttpServer())
+      .post('/auth/login')
+      .send({ identifier: email, password: 'P@ssw0rd!' })
+      .expect(200);
+
+    const cookies = response.get('Set-Cookie') ?? [];
+    return {
+      accessToken: response.body.accessToken as string,
+      refreshToken: response.body.refreshToken as string,
+      cookieHeader: joinCookies(...cookies),
+    };
+  }
+
+  it('rejects profile access without authentication', async () => {
+    await request(app.getHttpServer()).get('/core/profile').expect(401);
+  });
+
+  it('returns profile with non-cacheable headers for authenticated user', async () => {
+    const email = 'profile_cache_user@example.com';
+    const userId = await createUser('profile_cache_user', email);
+    const { accessToken } = await loginAs(userId, email);
+
+    const response = await request(app.getHttpServer())
+      .get('/core/profile')
+      .set('Authorization', `Bearer ${accessToken}`)
+      .expect(200);
+
+    expect(response.body.success).toBe(true);
+    expect(response.body.data.id).toEqual(userId);
+    expect(response.headers['cache-control']).toEqual('no-store');
+    expect(response.headers.pragma).toEqual('no-cache');
+    expect(response.headers.expires).toEqual('0');
+  });
+
+  it('returns 400 when attempting to update email or phone fields', async () => {
+    const email = 'profile_forbidden_fields@example.com';
+    const userId = await createUser('profile_forbidden_fields', email);
+    const { accessToken } = await loginAs(userId, email);
+
+    await request(app.getHttpServer())
+      .patch('/core/profile')
+      .set('Authorization', `Bearer ${accessToken}`)
+      .send({ email: 'new-email@example.com' })
+      .expect(400);
+
+    await request(app.getHttpServer())
+      .patch('/core/profile')
+      .set('Authorization', `Bearer ${accessToken}`)
+      .send({ phone: '09120000000' })
+      .expect(400);
+  });
+
+  it('issues HttpOnly access and refresh cookies across the auth lifecycle', async () => {
     const email = 'authcookie@example.com';
     const userId = await createUser('auth_cookie_user', email);
     await setUserPassword(userId);
@@ -183,48 +275,104 @@ describe('CoreModule (e2e)', () => {
       .send({ identifier: email, password: 'P@ssw0rd!' })
       .expect(200);
 
-    const loginCookies: string[] = loginRes.get('Set-Cookie') ?? [];
+    expect(loginRes.body.accessToken).toBeDefined();
     expect(loginRes.body.refreshToken).toBeDefined();
-    const loginCookie = loginCookies.find((cookie) =>
-      cookie.startsWith('refresh_token='),
-    );
-    expect(loginCookie).toBeDefined();
+
+    const loginCookies: string[] = loginRes.get('Set-Cookie') ?? [];
+    const loginAccessCookie = findCookie(loginCookies, 'access_token');
+    const loginRefreshCookie = findCookie(loginCookies, 'refresh_token');
+
+    expect(loginAccessCookie).toBeDefined();
+    expect(loginRefreshCookie).toBeDefined();
+
+    const loginCookieHeader = joinCookies(loginAccessCookie, loginRefreshCookie);
+    let currentAccessToken = loginRes.body.accessToken as string;
+
+    const profileRes = await request(app.getHttpServer())
+      .get('/core/profile')
+      .set('Cookie', loginCookieHeader)
+      .set('Authorization', `Bearer ${currentAccessToken}`)
+      .expect(200);
+
+    expect(profileRes.body.success).toBe(true);
+    expect(profileRes.body.data.id).toEqual(userId);
 
     const cookieRefreshRes = await request(app.getHttpServer())
       .post('/auth/refresh')
-      .set('Cookie', loginCookie as string)
+      .set('Cookie', loginCookieHeader)
+      .set('Authorization', `Bearer ${currentAccessToken}`)
+      .set(userHeader(userId))
       .send({})
       .expect(200);
 
+    expect(cookieRefreshRes.body.accessToken).toBeDefined();
+    expect(cookieRefreshRes.body.refreshToken).toBeDefined();
+    currentAccessToken = cookieRefreshRes.body.accessToken as string;
+
     const cookieRefreshCookies: string[] =
       cookieRefreshRes.get('Set-Cookie') ?? [];
-    const cookieModeToken = cookieRefreshRes.body.refreshToken;
-    expect(cookieModeToken).toBeDefined();
-    const cookieFromCookieFlow = cookieRefreshCookies.find((cookie) =>
-      cookie.startsWith('refresh_token='),
+    const refreshedAccessCookie = findCookie(
+      cookieRefreshCookies,
+      'access_token',
     );
-    expect(cookieFromCookieFlow).toBeDefined();
+    const refreshedRefreshCookie = findCookie(
+      cookieRefreshCookies,
+      'refresh_token',
+    );
 
-    const legacyRefreshRes = await request(app.getHttpServer())
-      .post('/auth/refresh')
-      .send({ refreshToken: cookieModeToken })
+    expect(refreshedAccessCookie).toBeDefined();
+    expect(refreshedRefreshCookie).toBeDefined();
+
+    const refreshedCookieHeader = joinCookies(
+      refreshedAccessCookie,
+      refreshedRefreshCookie,
+    );
+
+    await request(app.getHttpServer())
+      .get('/core/profile')
+      .set('Cookie', refreshedCookieHeader)
+      .set('Authorization', `Bearer ${currentAccessToken}`)
       .expect(200);
 
-    const legacyCookies: string[] = legacyRefreshRes.get('Set-Cookie') ?? [];
-    const latestCookie = legacyCookies.find((cookie) =>
-      cookie.startsWith('refresh_token='),
+    const fallbackRefreshRes = await request(app.getHttpServer())
+      .post('/auth/refresh')
+      .set('Authorization', `Bearer ${currentAccessToken}`)
+      .set(userHeader(userId))
+      .send({ refreshToken: cookieRefreshRes.body.refreshToken })
+      .expect(200);
+
+    expect(fallbackRefreshRes.body.accessToken).toBeDefined();
+    expect(fallbackRefreshRes.body.refreshToken).toBeDefined();
+    currentAccessToken = fallbackRefreshRes.body.accessToken as string;
+
+    const fallbackCookies: string[] = fallbackRefreshRes.get('Set-Cookie') ?? [];
+    const latestAccessCookie = findCookie(fallbackCookies, 'access_token');
+    const latestRefreshCookie = findCookie(fallbackCookies, 'refresh_token');
+
+    expect(latestAccessCookie).toBeDefined();
+    expect(latestRefreshCookie).toBeDefined();
+
+    const latestCookieHeader = joinCookies(
+      latestAccessCookie,
+      latestRefreshCookie,
     );
-    expect(latestCookie).toBeDefined();
-    const latestToken = legacyRefreshRes.body.refreshToken;
-    expect(latestToken).toBeDefined();
 
     const logoutRes = await request(app.getHttpServer())
       .post('/auth/logout')
-      .set('Cookie', latestCookie as string)
+      .set('Cookie', latestCookieHeader)
+      .set('Authorization', `Bearer ${currentAccessToken}`)
+      .set(userHeader(userId))
       .send({})
       .expect(200);
 
     const clearedCookies: string[] = logoutRes.get('Set-Cookie') ?? [];
+    expect(
+      clearedCookies.some(
+        (cookie) =>
+          cookie.startsWith('access_token=') &&
+          (cookie.includes('Expires=') || cookie.includes('Max-Age=0')),
+      ),
+    ).toBe(true);
     expect(
       clearedCookies.some(
         (cookie) =>
@@ -234,13 +382,18 @@ describe('CoreModule (e2e)', () => {
     ).toBe(true);
 
     await request(app.getHttpServer())
-      .post('/auth/refresh')
-      .send({ refreshToken: latestToken })
+      .get('/core/profile')
+      .set('Cookie', latestCookieHeader)
       .expect(401);
 
     await request(app.getHttpServer())
       .post('/auth/refresh')
-      .set('Cookie', latestCookie as string)
+      .send({ refreshToken: fallbackRefreshRes.body.refreshToken })
+      .expect(401);
+
+    await request(app.getHttpServer())
+      .post('/auth/refresh')
+      .set('Cookie', latestCookieHeader)
       .send({})
       .expect(401);
   });

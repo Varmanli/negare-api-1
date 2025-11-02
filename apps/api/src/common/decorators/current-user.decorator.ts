@@ -10,6 +10,7 @@ import { Request } from 'express';
 export interface CurrentUserPayload {
   id: string;
   roles: string[];
+  username?: string;
 }
 
 /**

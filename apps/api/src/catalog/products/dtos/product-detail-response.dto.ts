@@ -1,18 +1,18 @@
 import { ApiProperty } from '@nestjs/swagger';
-import { Product } from '../../entities/content/product.entity';
+import { ProductResponseDto } from './product-response.dto';
 
-export class ProductDetailResponseDto extends Product {
+export class ProductDetailResponseDto extends ProductResponseDto {
   @ApiProperty({
     description:
       'Indicates whether the authenticated user likes this product. Always false when unauthenticated.',
     example: true,
   })
-  liked: boolean;
+  declare liked: boolean;
 
   @ApiProperty({
     description:
       'Indicates whether the authenticated user bookmarked this product. Always false when unauthenticated.',
     example: false,
   })
-  bookmarked: boolean;
+  declare bookmarked: boolean;
 }

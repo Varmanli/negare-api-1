@@ -1,4 +1,4 @@
-﻿/**
+/**
  * UserRolesController exposes admin endpoints to browse and mutate user-role assignments.
  */
 import { Body, Controller, Delete, Get, Param, Post, Query } from '@nestjs/common';
@@ -9,7 +9,7 @@ import {
   ApiTags,
 } from '@nestjs/swagger';
 import { Roles } from '@app/common/decorators/roles.decorator';
-import { RoleName } from '@app/core/roles/entities/role.entity';
+import { RoleName } from '@app/prisma/prisma.constants';
 import { AssignRoleDto } from './dto/assign-role.dto';
 import { FindUserRolesQueryDto } from './dto/find-user-roles-query.dto';
 import { UserRoleIdParamDto } from './dto/user-role-id-param.dto';

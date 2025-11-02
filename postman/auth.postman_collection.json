@@ -1,0 +1,81 @@
+{
+  "info": {
+    "name": "Negare Auth Flows",
+    "description": "Login, refresh, logout, and protected profile requests with cookie-based refresh rotation.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "Login",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/{{GLOBAL_PREFIX}}/auth/login",
+          "host": ["{{baseUrl}}"],
+          "path": ["{{GLOBAL_PREFIX}}", "auth", "login"]
+        },
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"identifier\": \"negare_user\",\n  \"password\": \"Password!1\"\n}"
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "Refresh",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/{{GLOBAL_PREFIX}}/auth/refresh",
+          "host": ["{{baseUrl}}"],
+          "path": ["{{GLOBAL_PREFIX}}", "auth", "refresh"]
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "Logout",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/{{GLOBAL_PREFIX}}/auth/logout",
+          "host": ["{{baseUrl}}"],
+          "path": ["{{GLOBAL_PREFIX}}", "auth", "logout"]
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "Profile (protected)",
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "Authorization",
+            "value": "Bearer {{accessToken}}"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/{{GLOBAL_PREFIX}}/core/profile",
+          "host": ["{{baseUrl}}"],
+          "path": ["{{GLOBAL_PREFIX}}", "core", "profile"]
+        }
+      },
+      "response": []
+    }
+  ],
+  "variable": [
+    { "key": "baseUrl", "value": "http://localhost:4000" },
+    { "key": "GLOBAL_PREFIX", "value": "api" },
+    { "key": "accessToken", "value": "" }
+  ]
+}

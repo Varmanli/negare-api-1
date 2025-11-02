@@ -20,11 +20,11 @@ import {
 import { CategoriesService } from './categories.service';
 import { CreateCategoryDto } from './dtos/create-category.dto';
 import { UpdateCategoryDto } from './dtos/update-category.dto';
-import { Category } from '../entities/content/category.entity';
+import { CategoryResponseDto } from './dtos/category-response.dto';
 import { JwtAuthGuard } from '@app/core/auth/guards/jwt-auth.guard';
 import { RolesGuard } from '@app/common/guards/roles.guard';
 import { Roles } from '@app/common/decorators/roles.decorator';
-import { RoleName } from '@app/core/roles/entities/role.entity';
+import { RoleName } from '@app/prisma/prisma.constants';
 
 @ApiTags('Catalog Categories')
 @Controller('catalog/categories')
@@ -39,10 +39,10 @@ export class CategoriesController {
   @ApiResponse({
     status: 200,
     description: 'Categories fetched successfully.',
-    type: Category,
+    type: CategoryResponseDto,
     isArray: true,
   })
-  findAll(): Promise<Category[]> {
+  findAll(): Promise<CategoryResponseDto[]> {
     return this.categoriesService.findAll();
   }
 
@@ -58,9 +58,9 @@ export class CategoriesController {
   @ApiResponse({
     status: 201,
     description: 'Category created successfully.',
-    type: Category,
+    type: CategoryResponseDto,
   })
-  create(@Body() dto: CreateCategoryDto): Promise<Category> {
+  create(@Body() dto: CreateCategoryDto): Promise<CategoryResponseDto> {
     return this.categoriesService.create(dto);
   }
 
@@ -76,12 +76,12 @@ export class CategoriesController {
   @ApiResponse({
     status: 200,
     description: 'Category updated successfully.',
-    type: Category,
+    type: CategoryResponseDto,
   })
   update(
     @Param('id') id: string,
     @Body() dto: UpdateCategoryDto,
-  ): Promise<Category> {
+  ): Promise<CategoryResponseDto> {
     return this.categoriesService.update(id, dto);
   }
 

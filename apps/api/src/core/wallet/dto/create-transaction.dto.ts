@@ -10,7 +10,8 @@ import {
 import {
   WalletTransactionRefType,
   WalletTransactionType,
-} from '../wallet-transaction.entity';
+} from '@app/prisma/prisma.constants';
+import type { Prisma } from '@prisma/client';
 
 export class CreateWalletTransactionDto {
   @ApiProperty({ format: 'uuid' })
@@ -53,5 +54,5 @@ export class CreateWalletTransactionDto {
 
   @ApiPropertyOptional({ type: Object })
   @IsOptional()
-  metadata?: Record<string, unknown>;
+  metadata?: Prisma.InputJsonValue;
 }

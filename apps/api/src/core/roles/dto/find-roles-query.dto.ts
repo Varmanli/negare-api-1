@@ -1,10 +1,10 @@
-﻿/**
+/**
  * DTO describing optional filters when listing roles.
  */
 import { ApiPropertyOptional } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
 import { IsEnum, IsOptional, Max, Min } from 'class-validator';
-import { RoleName } from '@app/core/roles/entities/role.entity';
+import { RoleName } from '@app/prisma/prisma.constants';
 
 /**
  * Allows filtering by name and limiting results.

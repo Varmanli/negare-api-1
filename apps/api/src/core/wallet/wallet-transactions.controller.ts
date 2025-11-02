@@ -16,7 +16,7 @@ import {
   CurrentUser,
   CurrentUserPayload,
 } from '@app/common/decorators/current-user.decorator';
-import { RoleName } from '@app/core/roles/entities/role.entity';
+import { RoleName } from '@app/prisma/prisma.constants';
 import { FindWalletTransactionsQueryDto } from './dto/find-wallet-transactions-query.dto';
 import { WalletTransactionIdParamDto } from './dto/transaction-id-param.dto';
 import { WalletTransactionResponseDto } from './dto/transaction-response.dto';
