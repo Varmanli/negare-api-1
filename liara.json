@@ -6,6 +6,6 @@
     "command": "npm ci && npm run build",
     "location": "iran"
   },
-  "start": "npm run start:prod",
+  "start": "npx prisma migrate deploy --schema prisma/schema.prisma && npm run start:prod",
   "disks": []
 }
