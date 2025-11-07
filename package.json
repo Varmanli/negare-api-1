@@ -13,7 +13,7 @@
     "dev": "nest start --watch",
     "build": "prisma generate --schema prisma/schema.prisma && nest build api",
     "format": "prettier --write \"apps/api/src/**/*.ts\" \"apps/api/test/**/*.ts\" \"scripts/**/*.ts\"",
-    "start": "node dist/apps/api/main.js"
+    "start": "node dist/apps/api/main.js",
     "start:dev": "nest start --watch",
     "start:debug": "nest start api --debug --watch",
     "start:prod": "node dist/apps/api/main.js",
