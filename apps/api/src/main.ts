@@ -144,9 +144,15 @@ async function bootstrap() {
     SwaggerModule.setup(docsPath, app, swaggerDocument);
   }
 
-  // ---- Listen ----
-  const port = config.get<number>('PORT', { infer: true }) ?? 4000;
-  await app.listen(port, '0.0.0.0');
+// ---- Listen ----
+const defaultPort = 3000; // پورت پیش‌فرض برای لیارا و اکثر هاست‌ها
+const port = process.env.PORT
+  ? Number(process.env.PORT)
+  : config.get<number>('PORT', { infer: true }) ?? defaultPort;
+
+await app.listen(port, '0.0.0.0');
+console.log(`🚀 Server is running on port ${port}`);
+
 
   const appUrl = await app.getUrl();
   bootstrapLogger.log(`Application running at ${appUrl}`);
