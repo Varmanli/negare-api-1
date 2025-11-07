@@ -1,8 +1,11 @@
 {
   "app": "negare",
+  "platform": "node",
   "port": 3000,
   "build": {
+    "command": "npm ci && npm run build",
     "location": "iran"
   },
+  "start": "npm run start:prod",
   "disks": []
 }
