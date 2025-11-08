@@ -6,7 +6,6 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import type { Prisma as PrismaNS } from '@prisma/client';
-import { PrismaClientKnownRequestError } from '@app/prisma/prisma.constants';
 import { PrismaService } from '@app/prisma/prisma.service';
 import { UpdateProfileDto } from './dto/update-profile.dto';
 
@@ -17,6 +16,7 @@ import {
   USERNAME_REGEX,
   RESERVED_USERNAMES,
 } from './username.rules';
+import { PrismaClientKnownRequestError } from '@prisma/client/runtime/library';
 
 type RoleSlim = { id: string; name: string };
 

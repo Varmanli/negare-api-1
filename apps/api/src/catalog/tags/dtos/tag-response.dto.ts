@@ -1,12 +1,12 @@
 import { ApiProperty } from '@nestjs/swagger';
 
-export class TagResponseDto {
-  @ApiProperty({ example: '42' })
-  id: string;
+export class TagDto {
+  @ApiProperty() id!: string; // BigInt → string
+  @ApiProperty() name!: string;
+  @ApiProperty() slug!: string;
+  @ApiProperty({ example: 12 }) usageCount!: number; // تعداد محصولات
+}
 
-  @ApiProperty({ example: 'figma' })
-  name: string;
-
-  @ApiProperty({ example: 'figma' })
-  slug: string;
+export class TagListResultDto {
+  @ApiProperty({ type: [TagDto] }) items!: TagDto[];
 }

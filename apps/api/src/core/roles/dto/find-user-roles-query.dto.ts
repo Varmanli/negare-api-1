@@ -2,24 +2,33 @@
  * DTO describing optional filters when querying user-role assignments.
  */
 import { ApiPropertyOptional } from '@nestjs/swagger';
+import { RoleName } from '@prisma/client';
 import { IsEnum, IsOptional, IsUUID } from 'class-validator';
-import { RoleName } from '@app/prisma/prisma.constants';
 
 /**
  * Filter object used to narrow user-role listings.
  */
 export class FindUserRolesQueryDto {
-  @ApiPropertyOptional({ format: 'uuid', description: 'Filter results by user identifier.' })
+  @ApiPropertyOptional({
+    format: 'uuid',
+    description: 'Filter results by user identifier.',
+  })
   @IsOptional()
   @IsUUID('4')
   userId?: string;
 
-  @ApiPropertyOptional({ format: 'uuid', description: 'Filter results by role identifier.' })
+  @ApiPropertyOptional({
+    format: 'uuid',
+    description: 'Filter results by role identifier.',
+  })
   @IsOptional()
   @IsUUID('4')
   roleId?: string;
 
-  @ApiPropertyOptional({ enum: RoleName, description: 'Filter by role name enum value.' })
+  @ApiPropertyOptional({
+    enum: RoleName,
+    description: 'Filter by role name enum value.',
+  })
   @IsOptional()
   @IsEnum(RoleName)
   roleName?: RoleName;

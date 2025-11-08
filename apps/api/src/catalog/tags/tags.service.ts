@@ -1,120 +1,121 @@
 import {
-  BadRequestException,
   Injectable,
+  BadRequestException,
   NotFoundException,
 } from '@nestjs/common';
-import type { Prisma as PrismaNamespace } from '@prisma/client';
-import { Prisma } from '@app/prisma/prisma.constants';
-import { PrismaService } from '@app/prisma/prisma.service';
-import { CreateTagDto } from './dtos/create-tag.dto';
-import { UpdateTagDto } from './dtos/update-tag.dto';
-import { buildUniqueSlugCandidate, slugify } from '../utils/slug.util';
-import { TagResponseDto } from './dtos/tag-response.dto';
+import { Prisma } from '@prisma/client';
+import { PrismaService } from '../../prisma/prisma.service';
+import { CreateTagDto } from './dtos/tag-create.dto';
+import { UpdateTagDto } from './dtos/tag-update.dto';
+import { TagFindQueryDto } from './dtos/tag-query.dto';
+import { TagDto, TagListResultDto } from './dtos/tag-response.dto';
+import { TagMapper, TagWithCount } from './tag.mapper';
 
-const tagSelect = Prisma.validator<PrismaNamespace.TagSelect>()({
-  id: true,
-  name: true,
-  slug: true,
-});
-
-type TagRecord = PrismaNamespace.TagGetPayload<{ select: typeof tagSelect }>;
+/* ---------- helpers ---------- */
+function slugify(s: string): string {
+  return s
+    .toString()
+    .trim()
+    .toLowerCase()
+    .replace(/[\s\W]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+}
+function isBigIntStr(v?: string): v is string {
+  return !!v && /^\d+$/.test(v);
+}
 
 @Injectable()
 export class TagsService {
-  private readonly slugMaxAttempts = 10;
-
   constructor(private readonly prisma: PrismaService) {}
 
-  async findAll(): Promise<TagResponseDto[]> {
-    const tags = await this.prisma.tag.findMany({
-      select: tagSelect,
-      orderBy: { name: 'asc' },
-    });
-    return tags.map((tag) => this.mapTag(tag));
-  }
-
-  async create(dto: CreateTagDto): Promise<TagResponseDto> {
-    const slug = await this.resolveUniqueSlug(dto.slug ?? slugify(dto.name));
-
+  /* -------- Create -------- */
+  async create(dto: CreateTagDto): Promise<TagDto> {
+    const slug = dto.slug?.trim() || slugify(dto.name);
     const created = await this.prisma.tag.create({
-      data: {
-        name: dto.name,
-        slug,
-      },
-      select: tagSelect,
+      data: { name: dto.name.trim(), slug },
+      include: { _count: { select: { productLinks: true } } },
     });
-
-    return this.mapTag(created);
+    return TagMapper.toDto(created as TagWithCount);
   }
 
-  async update(id: string, dto: UpdateTagDto): Promise<TagResponseDto> {
-    const numericId = BigInt(id);
-    await this.ensureTagExists(numericId);
-
-    const data: PrismaNamespace.TagUpdateInput = {};
-
-    if (dto.name !== undefined) {
-      data.name = dto.name;
-    }
-
-    if (dto.slug !== undefined) {
-      data.slug = await this.resolveUniqueSlug(dto.slug, id);
-    } else if (dto.name) {
-      data.slug = await this.resolveUniqueSlug(slugify(dto.name), id);
-    }
-
+  /* -------- Update -------- */
+  async update(idStr: string, dto: UpdateTagDto): Promise<TagDto> {
+    if (!isBigIntStr(idStr)) throw new BadRequestException('Invalid tag id');
+    const data: Prisma.TagUpdateInput = {
+      name: dto.name?.trim() ?? undefined,
+      slug: dto.slug?.trim() ?? undefined,
+    };
     const updated = await this.prisma.tag.update({
-      where: { id: numericId },
+      where: { id: BigInt(idStr) },
       data,
-      select: tagSelect,
+      include: { _count: { select: { productLinks: true } } },
     });
-
-    return this.mapTag(updated);
+    return TagMapper.toDto(updated as TagWithCount);
   }
 
-  async remove(id: string): Promise<void> {
-    const numericId = BigInt(id);
-    const result = await this.prisma.tag.deleteMany({ where: { id: numericId } });
-    if (result.count === 0) {
-      throw new NotFoundException('Tag not found');
-    }
-  }
-
-  private async ensureTagExists(id: bigint): Promise<void> {
-    const exists = await this.prisma.tag.findUnique({
-      where: { id },
-      select: { id: true },
+  /* -------- Find One (by id or slug) -------- */
+  async findOne(idOrSlug: string): Promise<TagDto> {
+    const where: Prisma.TagWhereUniqueInput = isBigIntStr(idOrSlug)
+      ? { id: BigInt(idOrSlug) }
+      : { slug: idOrSlug };
+    const row = await this.prisma.tag.findUnique({
+      where,
+      include: { _count: { select: { productLinks: true } } },
     });
-    if (!exists) {
-      throw new NotFoundException('Tag not found');
-    }
+    if (!row) throw new NotFoundException('Tag not found');
+    return TagMapper.toDto(row as TagWithCount);
   }
 
-  private async resolveUniqueSlug(base: string, ignoreId?: string): Promise<string> {
-    if (!base) {
-      throw new BadRequestException('Slug could not be generated');
-    }
+  /* -------- List (flat) -------- */
+  async findAll(q: TagFindQueryDto): Promise<TagListResultDto> {
+    const limit = Math.min(Math.max(q.limit ?? 100, 1), 200);
 
-    for (let attempt = 0; attempt < this.slugMaxAttempts; attempt += 1) {
-      const candidate = buildUniqueSlugCandidate(base, attempt);
-      const existing = await this.prisma.tag.findUnique({
-        where: { slug: candidate },
-        select: { id: true },
+    const ands: Prisma.TagWhereInput[] = [];
+    if (q.q?.trim()) {
+      const term = q.q.trim();
+      ands.push({
+        OR: [
+          { name: { contains: term, mode: 'insensitive' } },
+          { slug: { contains: term, mode: 'insensitive' } },
+        ],
       });
-
-      if (!existing || (ignoreId && existing.id.toString() === ignoreId)) {
-        return candidate;
-      }
+    }
+    if (q.usedOnly === 'true') {
+      ands.push({ productLinks: { some: {} } });
     }
 
-    throw new BadRequestException('Unable to generate unique tag slug');
+    const where: Prisma.TagWhereInput = ands.length ? { AND: ands } : {};
+
+    const rows = await this.prisma.tag.findMany({
+      where,
+      orderBy: [{ name: 'asc' }],
+      take: limit,
+      include: { _count: { select: { productLinks: true } } },
+    });
+
+    return { items: rows.map((r) => TagMapper.toDto(r as TagWithCount)) };
   }
 
-  private mapTag(tag: TagRecord): TagResponseDto {
-    const dto = new TagResponseDto();
-    dto.id = tag.id.toString();
-    dto.name = tag.name;
-    dto.slug = tag.slug;
-    return dto;
+  /* -------- Popular (by usage count) -------- */
+  async popular(limit = 20): Promise<TagListResultDto> {
+    const take = Math.min(Math.max(limit, 1), 100);
+    const rows = await this.prisma.tag.findMany({
+      orderBy: [
+        { productLinks: { _count: 'desc' } }, // بر پایه تعداد محصولات
+        { name: 'asc' },
+      ],
+      take,
+      include: { _count: { select: { productLinks: true } } },
+    });
+    return { items: rows.map((r) => TagMapper.toDto(r as TagWithCount)) };
+  }
+
+  /* -------- Remove -------- */
+  async remove(idStr: string): Promise<void> {
+    if (!isBigIntStr(idStr)) throw new BadRequestException('Invalid tag id');
+    await this.prisma.$transaction(async (trx) => {
+      await trx.productTag.deleteMany({ where: { tagId: BigInt(idStr) } });
+      await trx.tag.delete({ where: { id: BigInt(idStr) } });
+    });
   }
 }

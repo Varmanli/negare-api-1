@@ -22,7 +22,7 @@ import { FindRolesQueryDto } from './dto/find-roles-query.dto';
 import { RoleNameParamDto } from './dto/role-name-param.dto';
 import { UpdateRoleDto } from './dto/update-role.dto';
 import { RolesService } from './roles.service';
-import { RoleName } from '@app/prisma/prisma.constants';
+import { RoleName } from '@prisma/client';
 
 @ApiTags('Roles')
 @ApiBearerAuth('bearer')
@@ -38,7 +38,7 @@ export class RolesController {
    * @param query Query params including optional name filter.
    */
   @Get()
-  @Roles(RoleName.ADMIN)
+  @Roles(RoleName.admin)
   @ApiOperation({
     summary: 'List roles',
     description: 'Lists roles with optional filtering by name.',
@@ -47,7 +47,6 @@ export class RolesController {
     status: 200,
     description: 'Roles retrieved successfully.',
   })
-
   findAll(@Query() query: FindRolesQueryDto) {
     return this.rolesService.findAll(query);
   }
@@ -65,7 +64,6 @@ export class RolesController {
     status: 200,
     description: 'Role retrieved successfully.',
   })
-
   findByName(@Param() params: RoleNameParamDto) {
     return this.rolesService.findByName(params.name);
   }
@@ -75,13 +73,12 @@ export class RolesController {
    * @param dto Role creation payload.
    */
   @Post()
-  @Roles(RoleName.ADMIN)
+  @Roles(RoleName.admin)
   @ApiOperation({
     summary: 'Create role',
     description: 'Creates a new role using one of the predefined enum values.',
   })
   @ApiResponse({ status: 201, description: 'Role created successfully.' })
-
   create(@Body() dto: CreateRoleDto) {
     return this.rolesService.create(dto);
   }
@@ -92,14 +89,13 @@ export class RolesController {
    * @param dto Payload containing the new name.
    */
   @Patch(':name')
-  @Roles(RoleName.ADMIN)
+  @Roles(RoleName.admin)
   @ApiOperation({
     summary: 'Update role',
     description:
       'Replaces the existing role name with a new enum value. Returns 404 when the role is not found.',
   })
   @ApiResponse({ status: 200, description: 'Role updated successfully.' })
-
   update(@Param() params: RoleNameParamDto, @Body() dto: UpdateRoleDto) {
     return this.rolesService.update(params.name, dto);
   }

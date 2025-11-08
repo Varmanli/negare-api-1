@@ -29,7 +29,6 @@ import { JwtAuthGuard } from '@app/core/auth/guards/jwt-auth.guard';
 import { NoCacheInterceptor } from '@app/common/interceptors/no-cache.interceptor';
 
 import { OtpService } from '../otp/otp.service';
-import { OtpChannel, OtpPurpose } from '@app/prisma/prisma.constants';
 import { TokenService } from '../token/token.service';
 import { PasswordService } from './password.service';
 import { RequestOtpDto } from '../dto/otp/otp-request.dto';
@@ -41,6 +40,7 @@ import {
   ResetPasswordDto,
   SetPasswordDto,
 } from '../dto/password/password.dto';
+import { OtpChannel, OtpPurpose } from '@prisma/client';
 
 @ApiTags('Authentication - Password')
 @UseInterceptors(NoCacheInterceptor)

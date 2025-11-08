@@ -1,29 +1,30 @@
-import { ProductsService } from '@app/catalog/products/products.service';
+import { ProductsService } from '@app/catalog/product/product.service';
 import { CountersService } from '@app/catalog/counters/counters.service';
 import { PricingType } from '@app/prisma/prisma.constants';
-import type { ProductWithRelations } from '@app/catalog/products/product.mapper';
+import type { ProductWithRelations } from '@app/catalog/product/product.mapper';
 
-const createProduct = (id: bigint): ProductWithRelations => ({
-  id,
-  slug: `product-${id}`,
-  title: 'Demo',
-  description: null,
-  coverUrl: null,
-  pricingType: PricingType.FREE,
-  price: null,
-  active: true,
-  publishedAt: null,
-  viewsCount: 0,
-  downloadsCount: 0,
-  likesCount: 0,
-  createdAt: new Date(),
-  updatedAt: new Date(),
-  file: null,
-  assets: [],
-  categoryLinks: [],
-  tagLinks: [],
-  supplierLinks: [],
-} as unknown as ProductWithRelations);
+const createProduct = (id: bigint): ProductWithRelations =>
+  ({
+    id,
+    slug: `product-${id}`,
+    title: 'Demo',
+    description: null,
+    coverUrl: null,
+    pricingType: PricingType.FREE,
+    price: null,
+    active: true,
+    publishedAt: null,
+    viewsCount: 0,
+    downloadsCount: 0,
+    likesCount: 0,
+    createdAt: new Date(),
+    updatedAt: new Date(),
+    file: null,
+    assets: [],
+    categoryLinks: [],
+    tagLinks: [],
+    supplierLinks: [],
+  }) as unknown as ProductWithRelations;
 
 describe('ProductsService.decorateProductWithUserState', () => {
   const prisma = {
@@ -62,7 +63,10 @@ describe('ProductsService.decorateProductWithUserState', () => {
   it('returns false flags for anonymous users', async () => {
     const product = createProduct(10n);
 
-    const result = await service.decorateProductWithUserState(product, undefined);
+    const result = await service.decorateProductWithUserState(
+      product,
+      undefined,
+    );
 
     expect(result.liked).toBe(false);
     expect(result.bookmarked).toBe(false);

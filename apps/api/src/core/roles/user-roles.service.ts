@@ -1,9 +1,13 @@
-import { ConflictException, Injectable, NotFoundException } from '@nestjs/common';
+import {
+  ConflictException,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
 import type { Prisma as PrismaNamespace } from '@prisma/client';
-import { PrismaClientKnownRequestError } from '@app/prisma/prisma.constants';
 import { PrismaService } from '@app/prisma/prisma.service';
 import { AssignRoleDto } from './dto/assign-role.dto';
 import { FindUserRolesQueryDto } from './dto/find-user-roles-query.dto';
+import { PrismaClientKnownRequestError } from '@prisma/client/runtime/library';
 
 type UserRoleWithRelations = PrismaNamespace.UserRoleGetPayload<{
   include: {
@@ -16,7 +20,9 @@ type UserRoleWithRelations = PrismaNamespace.UserRoleGetPayload<{
 export class UserRolesService {
   constructor(private readonly prisma: PrismaService) {}
 
-  async findAll(query: FindUserRolesQueryDto): Promise<UserRoleWithRelations[]> {
+  async findAll(
+    query: FindUserRolesQueryDto,
+  ): Promise<UserRoleWithRelations[]> {
     const where: PrismaNamespace.UserRoleWhereInput = {};
 
     if (query.userId) {

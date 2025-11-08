@@ -4,10 +4,11 @@
 
 The authentication layer now guarantees hop-by-hop security for both CSR and SSR clients. Key traits:
 
-- Username / email / phone login issues an access token (response body) and a refresh token stored **only** in an HttpOnly cookie (`Path=/`).
+- Username / email / phone login issues an access token (response body) and a refresh token stored **only** in an HttpOnly cookie (default `Path=/api/auth/refresh`, `SameSite` / `Secure` derived from env).
 - Refresh tokens rotate on every call: the previous JTI is blacklisted, the new JTI is linked to the same session, and the cookie is reissued.
 - Sessions live in Redis with per-user sets, sorted indices, and reverse JTI lookups for revoke/touch flows.
-- Logout clears refresh cookies for every known path (`/`, `/api`, `/api/auth`), blacklists the supplied JTI, and tears down the Redis session.
+- `/auth/refresh` is marked `@Public()`, enforces JSON requests + allowed Origins, is rate-limited via Redis, and emits trace-aware logs for allow-list hits/misses.
+- Logout clears the refresh cookie on the configured path, blacklists the supplied JTI, and tears down the Redis session.
 - Swagger exposes both `Bearer` and cookie auth schemes; the Postman collection mirrors the same behaviour for local testing.
 
 ## Login → Refresh → Logout (happy path)
@@ -20,16 +21,15 @@ Login (identifier + password)
   │     ├─ TokenService.signAccess + signRefresh (HS256)
   │     ├─ Redis allow-list key auth:refresh:allow:<jti>
   │     └─ SessionService.linkRefreshJti(userId, sid, jti)
-  └─ Set-Cookie refresh_token=…; HttpOnly; SameSite=Lax; Path=/
+  └─ Set-Cookie refresh_token=…; HttpOnly; SameSite (env); Path=/api/auth/refresh
 
 Refresh (cookie only)
-  ├─ RefreshService.peekPayload(cookie) → { sub, sid, jti }
+  ├─ Controller enforces JSON body, allowed Origin/Referer, and Redis-backed rate-limit
   ├─ RefreshService.refresh(refreshToken)
   │     ├─ validate allow-list + blacklist old jti
   │     ├─ SessionService.unlinkRefreshJti(sub, sid, oldJti)
   │     └─ mint new pair + relink session
-  ├─ SessionService.touch(sub, sid)
-  └─ Set-Cookie refresh_token=…; HttpOnly; Path=/
+  └─ Set-Cookie refresh_token=…; HttpOnly; Path=/api/auth/refresh
 
 Logout
   ├─ RefreshService.peekPayload(refresh, ignoreExp=true)
@@ -37,7 +37,30 @@ Logout
   │     ├─ blacklist jti
   │     └─ unlink session ↔ jti
   ├─ SessionService.revoke(sub, sid)
-  └─ Clear refresh cookie on /api/auth, /api, /
+  └─ Clear refresh cookie on configured path (`COOKIE_REFRESH_PATH`)
+
+## Refresh Endpoint Hardening
+
+- `/api/auth/refresh` is explicitly annotated with `@Public()`, so the HybridAuth guard skips it while the controller performs its own checks.
+- Only `POST` requests with `Content-Type: application/json` are accepted; `Origin` and `Referer` must match `FRONTEND_URL`, otherwise the call is rejected with `403 OriginNotAllowed`.
+- A Redis-backed rate limiter (`RefreshRateLimitService`) guards brute-force attempts (defaults: `REFRESH_RL_MAX=5` requests per `REFRESH_RL_WINDOW=10s`, keyed by IP + User-Agent).
+- Each call consumes the allow-list entry, blacklists the old JTI, relinks the session/JTI pair, and issues a fresh cookie:  
+  `Set-Cookie: refresh_token=...; HttpOnly; SameSite=<env>; Secure=<env>; Path=/api/auth/refresh`.
+- Missing cookies produce `401 No refresh cookie`; reusing a rotated cookie immediately hits the allow-list miss path (401) and leaves the old JTI blacklisted.
+- CORS is pinned to `FRONTEND_URL` with `credentials: true`, and `app.set('trust proxy', 1)` ensures `req.secure` works behind HTTPS terminators.
+- Trace-aware logs capture cookie presence, `{ sub, sid, jti }`, allow-list hits/misses, and rotation outcomes to simplify debugging across pods.
+
+### Manual Verification
+
+1. Login → inspect the first `Set-Cookie` header. It must include `HttpOnly`, `Path=/api/auth/refresh`, `SameSite=Lax` in dev (or `None` in prod), and `Secure` only when HTTPS is enabled.
+2. `curl -i -X POST http://localhost:4000/api/auth/refresh \`  
+   `     -H "Origin: http://localhost:3000" \`  
+   `     -H "Content-Type: application/json" \`  
+   `     -H "Cookie: refresh_token=<PASTE_TOKEN>"`  
+   returns `200` with body `{ "success": true, "data": { "accessToken": "..." } }` plus a brand-new `refresh_token` cookie.
+3. Reuse the old cookie after rotation → `401 { code: "InvalidRefresh" }`.
+4. Omit the cookie entirely → `401 { code: "MissingRefresh" }`.
+5. Spoof the `Origin`/`Referer` or send a non-JSON body → expect `403 OriginNotAllowed` or `400 InvalidContentType`.
 ```
 
 ## SSR vs CSR clients
@@ -52,8 +75,9 @@ Logout
 Core `.env` knobs (see `.env.example`):
 
 - `ACCESS_JWT_SECRET` / `REFRESH_JWT_SECRET` & matching `*_EXPIRES` durations (`10m`, `30d`, etc.).
-- `COOKIE_SAMESITE`, `COOKIE_SECURE`, `COOKIE_REFRESH_PATH=/`, `COOKIE_ACCESS_PATH=/`.
-- `GLOBAL_PREFIX=api`, `CORS_ORIGIN=http://localhost:3000`, `REDIS_URL=redis://localhost:6379`.
+- `COOKIE_SAMESITE`, `COOKIE_SECURE`, `COOKIE_REFRESH_PATH=/api/auth/refresh`, `COOKIE_ACCESS_PATH=/`.
+- `GLOBAL_PREFIX=api`, `FRONTEND_URL=http://localhost:3000` (used for both CORS + Origin enforcement), `CORS_ORIGIN` (legacy fallback), `REDIS_URL=redis://localhost:6379`.
+- Refresh throttling knobs: `REFRESH_RL_MAX` (default 5) and `REFRESH_RL_WINDOW` (default 10s).
 - Production: set `COOKIE_SECURE=true` and `COOKIE_SAMESITE=none` once the API is served over HTTPS.
 
 ## Running & Testing
@@ -66,6 +90,11 @@ npm run test:cov         # full coverage report (HTML + lcov)
 ```
 
 All tests assume Redis is available — the suite boots against an in-memory fake Redis used by the services.
+
+Key coverage:
+
+- `apps/api/test/auth/auth.e2e.spec.ts` — legacy login/profile smoke tests.
+- `apps/api/test/auth/auth.refresh.e2e.spec.ts` — refresh cookie issuance, allow-list rotation, concurrency failures, malformed Redis entries, session mismatch, cookie-flag assertions for dev/prod, and Origin enforcement.
 
 ## Upload Module
 
@@ -93,7 +122,10 @@ The chunked upload pipeline lives under `apps/api/src/core/upload` and now ships
        -d '{"identifier":"negare_user","password":"Password!1"}'
 
   curl -i -X POST http://localhost:4000/api/auth/refresh \
-       -H "Cookie: refresh_token=<TOKEN>"
+       -H "Origin: http://localhost:3000" \
+       -H "Content-Type: application/json" \
+       -H "Cookie: refresh_token=<TOKEN>" \
+       -d '{}'
   ```
 
 ## Production Notes

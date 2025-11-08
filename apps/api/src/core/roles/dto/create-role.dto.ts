@@ -2,14 +2,17 @@
  * DTO for creating new role definitions.
  */
 import { ApiProperty } from '@nestjs/swagger';
+import { RoleName } from '@prisma/client';
 import { IsEnum } from 'class-validator';
-import { RoleName } from '@app/prisma/prisma.constants';
 
 /**
  * Captures the enum-backed name when creating a role.
  */
 export class CreateRoleDto {
-  @ApiProperty({ enum: RoleName, description: 'Role name from the predefined enum.' })
+  @ApiProperty({
+    enum: RoleName,
+    description: 'Role name from the predefined enum.',
+  })
   @IsEnum(RoleName)
   name: RoleName;
 }

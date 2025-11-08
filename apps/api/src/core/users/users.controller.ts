@@ -27,7 +27,7 @@ import { FindUsersQueryDto } from './dto/find-users-query.dto';
 import { UpdateUserDto } from './dto/update-user.dto';
 import { UserIdParamDto } from './dto/user-id-param.dto';
 import { UsersService } from './users.service';
-import { RoleName } from '@app/prisma/prisma.constants';
+import { RoleName } from '@prisma/client';
 
 @ApiTags('Users')
 @ApiBearerAuth('bearer')
@@ -43,10 +43,11 @@ export class UsersController {
    * @param query Filter and pagination options.
    */
   @Get()
-  @Roles(RoleName.ADMIN)
+  @Roles(RoleName.admin)
   @ApiOperation({
     summary: 'List users',
-    description: 'Returns users filtered by the provided pagination and search parameters. Admin only.',
+    description:
+      'Returns users filtered by the provided pagination and search parameters. Admin only.',
   })
   @ApiResponse({
     status: 200,
@@ -64,7 +65,8 @@ export class UsersController {
   @Get(':id')
   @ApiOperation({
     summary: 'Get user by id',
-    description: 'Fetches a single user. Admins may view any user; others may only view their own profile.',
+    description:
+      'Fetches a single user. Admins may view any user; others may only view their own profile.',
   })
   @ApiResponse({
     status: 200,
@@ -83,10 +85,11 @@ export class UsersController {
    * @param createUserDto Payload validated by DTO.
    */
   @Post()
-  @Roles(RoleName.ADMIN)
+  @Roles(RoleName.admin)
   @ApiOperation({
     summary: 'Create user',
-    description: 'Registers a new user record. Accessible to administrators only.',
+    description:
+      'Registers a new user record. Accessible to administrators only.',
   })
   @ApiResponse({ status: 201, description: 'User created successfully.' })
   create(@Body() createUserDto: CreateUserDto) {
@@ -99,10 +102,11 @@ export class UsersController {
    * @param updateUserDto Partial update payload.
    */
   @Patch(':id')
-  @Roles(RoleName.ADMIN)
+  @Roles(RoleName.admin)
   @ApiOperation({
     summary: 'Update user',
-    description: 'Updates an existing user record. Accessible to administrators only.',
+    description:
+      'Updates an existing user record. Accessible to administrators only.',
   })
   @ApiResponse({ status: 200, description: 'User updated successfully.' })
   update(
@@ -127,10 +131,12 @@ export class UsersController {
     }
 
     const isOwner = currentUser.id === userId;
-    const isAdmin = currentUser.roles?.includes(RoleName.ADMIN);
+    const isAdmin = currentUser.roles?.includes(RoleName.admin);
 
     if (!isOwner && !isAdmin) {
-      throw new ForbiddenException('You are not permitted to access this user.');
+      throw new ForbiddenException(
+        'You are not permitted to access this user.',
+      );
     }
   }
 }

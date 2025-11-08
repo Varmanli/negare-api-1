@@ -1,22 +1,21 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 
-export class CategoryResponseDto {
-  @ApiProperty({ example: '12' })
-  id: string;
+export class CategoryDto {
+  @ApiProperty() id!: string; // BigInt → string
+  @ApiProperty() name!: string;
+  @ApiProperty() slug!: string;
+  @ApiPropertyOptional() parentId?: string | null;
+}
 
-  @ApiProperty({ example: 'UI Kits' })
-  name: string;
+export class CategoryTreeNodeDto extends CategoryDto {
+  @ApiProperty({ type: () => [CategoryTreeNodeDto] })
+  children!: CategoryTreeNodeDto[];
+}
 
-  @ApiProperty({ example: 'ui-kits' })
-  slug: string;
+export class CategoryListResultDto {
+  @ApiProperty({ type: [CategoryDto] }) items!: CategoryDto[];
+}
 
-  @ApiPropertyOptional({ example: '5' })
-  parentId?: string | null;
-
-  @ApiProperty({
-    type: () => [CategoryResponseDto],
-    description: 'Nested child categories.',
-    required: false,
-  })
-  children?: CategoryResponseDto[];
+export class CategoryBreadcrumbDto {
+  @ApiProperty({ type: [CategoryDto] }) path!: CategoryDto[]; // root..self
 }

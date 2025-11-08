@@ -68,6 +68,7 @@ export class FakeRedis {
   private readonly values = new Map<string, string>();
   private readonly sets = new Map<string, Set<string>>();
   private readonly zsets = new Map<string, Map<string, number>>();
+  private readonly expirations = new Map<string, number>();
 
   pipeline() {
     return new FakeRedisPipeline(this);
@@ -85,16 +86,17 @@ export class FakeRedis {
   ): Promise<'OK'> {
     this.values.set(key, value);
     if (mode === 'EX' && typeof ttl === 'number') {
-      // crude TTL handling for tests (cap to 32-bit timeout range)
-      const ms = Math.min(ttl * 1000, 0x7fffffff);
-      setTimeout(() => {
-        this.values.delete(key);
-      }, ms).unref?.();
+      this.scheduleExpiration(key, ttl * 1000);
+    } else {
+      this.expirations.delete(key);
     }
     return 'OK';
   }
 
   async get(key: string): Promise<string | null> {
+    if (this.isExpired(key)) {
+      return null;
+    }
     return this.values.has(key) ? this.values.get(key)! : null;
   }
 
@@ -108,6 +110,7 @@ export class FakeRedis {
     let removed = 0;
     for (const key of keys) {
       if (this.values.delete(key)) removed++;
+      this.expirations.delete(key);
       const set = this.sets.get(key);
       if (set) {
         removed += set.size;
@@ -163,9 +166,47 @@ export class FakeRedis {
 
   async expire(key: string, ttl: number): Promise<number> {
     if (!this.values.has(key)) return 0;
-    const ms = Math.min(ttl * 1000, 0x7fffffff);
-    setTimeout(() => this.values.delete(key), ms).unref?.();
+    if (ttl <= 0) {
+      await this.del(key);
+      return 1;
+    }
+    this.scheduleExpiration(key, ttl * 1000);
     return 1;
+  }
+
+  async incr(key: string): Promise<number> {
+    if (this.isExpired(key)) {
+      // freshly expired -> treat as absent
+    }
+    const current = Number(this.values.get(key) ?? '0');
+    const next = current + 1;
+    this.values.set(key, String(next));
+    return next;
+  }
+
+  async ttl(key: string): Promise<number> {
+    if (!this.values.has(key)) return -2;
+    const expiry = this.expirations.get(key);
+    if (!expiry) return -1;
+    const msLeft = expiry - Date.now();
+    if (msLeft <= 0) {
+      this.values.delete(key);
+      this.expirations.delete(key);
+      return -2;
+    }
+    return Math.ceil(msLeft / 1000);
+  }
+
+  async keys(pattern: string): Promise<string[]> {
+    this.purgeExpiredValues();
+    const escaped = pattern.replace(/[-[\]/{}()*+?.\\^$|]/g, '\\$&');
+    const regex = new RegExp(`^${escaped.replace(/\\\*/g, '.*')}$`);
+    const bag = new Set<string>([
+      ...this.values.keys(),
+      ...this.sets.keys(),
+      ...this.zsets.keys(),
+    ]);
+    return Array.from(bag).filter((key) => regex.test(key));
   }
 
   private ensureSet(key: string): Set<string>;
@@ -190,6 +231,36 @@ export class FakeRedis {
       this.zsets.set(key, new Map());
     }
     return this.zsets.get(key);
+  }
+
+  private scheduleExpiration(key: string, ttlMs: number): void {
+    const expiresAt = Date.now() + ttlMs;
+    this.expirations.set(key, expiresAt);
+    const ms = Math.min(Math.max(ttlMs, 0), 0x7fffffff);
+    const timeout = setTimeout(() => {
+      this.values.delete(key);
+      this.expirations.delete(key);
+    }, ms);
+    (timeout as any).unref?.();
+  }
+
+  private isExpired(key: string): boolean {
+    const expiry = this.expirations.get(key);
+    if (!expiry) {
+      return false;
+    }
+    if (expiry <= Date.now()) {
+      this.expirations.delete(key);
+      this.values.delete(key);
+      return true;
+    }
+    return false;
+  }
+
+  private purgeExpiredValues(): void {
+    for (const key of Array.from(this.expirations.keys())) {
+      this.isExpired(key);
+    }
   }
 }
 

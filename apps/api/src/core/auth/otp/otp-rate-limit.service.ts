@@ -2,7 +2,7 @@ import { HttpException, HttpStatus, Inject, Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import type Redis from 'ioredis';
 import { createHash } from 'crypto';
-import { OtpChannel, OtpPurpose } from '@app/prisma/prisma.constants';
+import { OtpChannel, OtpPurpose } from '@prisma/client';
 
 @Injectable()
 export class OtpRateLimitService {

@@ -8,10 +8,10 @@ import { ConfigService } from '@nestjs/config';
 import { sign, SignOptions } from 'jsonwebtoken';
 import * as crypto from 'crypto';
 import type Redis from 'ioredis';
-import { OtpChannel, OtpPurpose } from '@app/prisma/prisma.constants';
 import { SmsService } from '@app/sms/sms.service';
 import { MailService } from '@app/mail/mail.service';
 import { OtpRateLimitService } from './otp-rate-limit.service';
+import { OtpChannel, OtpPurpose } from '@prisma/client';
 
 export interface AuditService {
   log(

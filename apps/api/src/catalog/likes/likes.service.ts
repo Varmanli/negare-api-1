@@ -1,207 +1,134 @@
+// apps/api/src/core/catalog/likes/likes.service.ts
+import { Injectable, BadRequestException } from '@nestjs/common';
+import { PrismaService } from '../../prisma/prisma.service';
 import {
-  BadRequestException,
-  Injectable,
-  NotFoundException,
-} from '@nestjs/common';
-import type { Prisma as PrismaNamespace } from '@prisma/client';
-import { Prisma, PrismaClientKnownRequestError } from '@app/prisma/prisma.constants';
-import { PrismaService } from '@app/prisma/prisma.service';
-import {
-  clampPagination,
-  PaginationResult,
-  toPaginationResult,
-} from '../utils/pagination.util';
-import { ListQueryDto } from '../dtos/list-query.dto';
-import {
-  mapProduct,
-  productWithRelations,
-  ProductWithRelations,
-} from '../products/product.mapper';
-import { ProductResponseDto } from '../products/dtos/product-response.dto';
+  ProductMapper,
+  productInclude,
+  type ProductWithRelations,
+} from '../product/product.mapper';
+import { Prisma } from '@prisma/client';
+import { Buffer } from 'buffer';
+import { LikeToggleResponseDto } from './dtos/like-toggle.dto';
+import { UserLikeItemDto, UserLikesResultDto } from './dtos/likes-response.dto';
 
-export interface ToggleLikeResult {
-  liked: boolean;
-  likesCount: number;
+/* ---------------- Helpers ---------------- */
+function encodeCursor(obj: Record<string, string | number>) {
+  return Buffer.from(JSON.stringify(obj), 'utf8').toString('base64url');
+}
+function decodeCursor<T>(cursor?: string | null): T | null {
+  if (!cursor) return null;
+  try {
+    const json = Buffer.from(cursor, 'base64url').toString('utf8');
+    return JSON.parse(json) as T;
+  } catch {
+    return null;
+  }
+}
+function toBigIntOrThrow(id: string): bigint {
+  if (!/^\d+$/.test(id)) throw new BadRequestException('Invalid product id');
+  return BigInt(id);
 }
 
-const likeInclude = Prisma.validator<PrismaNamespace.LikeInclude>()({
-  product: productWithRelations,
-});
-
-type LikeWithProduct = PrismaNamespace.LikeGetPayload<{
-  include: typeof likeInclude;
+/** Like + product include typing */
+type LikeWithProduct = Prisma.LikeGetPayload<{
+  include: { product: { include: typeof productInclude } };
 }>;
 
 @Injectable()
 export class LikesService {
   constructor(private readonly prisma: PrismaService) {}
 
-  async toggleLike(
+  /** لایک یا آن‌لایک کردن محصول */
+  async toggle(
     userId: string,
-    productId: string,
-    desiredState?: boolean,
-  ): Promise<ToggleLikeResult> {
-    const numericId = this.ensureNumericId(productId);
+    productIdStr: string,
+  ): Promise<LikeToggleResponseDto> {
+    const productId = toBigIntOrThrow(productIdStr);
 
-    return this.prisma.$transaction(
-      async (tx) => {
-        const product = await tx.product.findUnique({
-          where: { id: numericId },
-          select: { id: true },
-        });
-
-        if (!product) {
-          throw new NotFoundException('Product not found');
-        }
-
-        const likeWhere: PrismaNamespace.LikeWhereUniqueInput = {
-          userId_productId: { userId, productId: numericId },
-        };
-
-        const existing = await tx.like.findUnique({ where: likeWhere });
-
-        let liked: boolean;
-
-        if (desiredState === undefined) {
-          liked = !existing;
-          if (existing) {
-            await tx.like.delete({ where: likeWhere });
-            await this.adjustLikesCount(tx, numericId, -1);
-          } else {
-            await this.createLike(tx, userId, numericId);
-            await this.adjustLikesCount(tx, numericId, 1);
-          }
-        } else if (desiredState) {
-          liked = true;
-          if (!existing) {
-            await this.createLike(tx, userId, numericId);
-            await this.adjustLikesCount(tx, numericId, 1);
-          }
-        } else {
-          liked = false;
-          if (existing) {
-            await tx.like.delete({ where: likeWhere });
-            await this.adjustLikesCount(tx, numericId, -1);
-          }
-        }
-
-        const refreshed = await tx.product.findUnique({
-          where: { id: numericId },
-          select: { likesCount: true },
-        });
-
-        return {
-          liked,
-          likesCount: refreshed?.likesCount ?? 0,
-        };
-      },
-      { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
-    );
-  }
-
-  async isProductLiked(userId: string, productId: string): Promise<boolean> {
-    const numericId = this.ensureNumericId(productId);
-    const like = await this.prisma.like.findUnique({
-      where: { userId_productId: { userId, productId: numericId } },
-      select: { userId: true },
+    const existing = await this.prisma.like.findUnique({
+      where: { userId_productId: { userId, productId } },
     });
-    return Boolean(like);
-  }
 
-  async listLikedProducts(
-    userId: string,
-    query: ListQueryDto,
-  ): Promise<PaginationResult<ProductResponseDto>> {
-    const { page, limit, skip } = clampPagination(query.page, query.limit);
-
-    const [total, likes] = (await this.prisma.$transaction([
-      this.prisma.like.count({ where: { userId } }),
-      this.prisma.like.findMany({
-        where: { userId },
-        orderBy: [
-          { createdAt: 'desc' },
-          { productId: 'desc' },
-        ],
-        skip,
-        take: limit,
-        include: likeInclude,
-      }),
-    ])) as [number, LikeWithProduct[]];
-
-    const data = likes
-      .map((like) => like.product)
-      .filter((product): product is ProductWithRelations => Boolean(product))
-      .map((product) => Object.assign(mapProduct(product), { liked: true }));
-
-    return toPaginationResult(data, total, page, limit);
-  }
-
-  private ensureNumericId(productId: string): bigint {
-    if (!/^\d+$/.test(productId)) {
-      throw new BadRequestException('Product id must be numeric');
+    if (existing) {
+      // آن‌لایک: حذف رکورد + کاهش شمارنده‌ی محصول
+      await this.prisma.$transaction([
+        this.prisma.like.delete({
+          where: { userId_productId: { userId, productId } },
+        }),
+        this.prisma.product.update({
+          where: { id: productId },
+          data: { likesCount: { decrement: 1 } },
+        }),
+      ]);
+      return { liked: false };
     }
-    return BigInt(productId);
-  }
 
-  private async createLike(
-    tx: PrismaNamespace.TransactionClient,
-    userId: string,
-    productId: bigint,
-  ): Promise<void> {
-    try {
-      await tx.like.create({
+    // لایک: ساخت رکورد + افزایش شمارنده‌ی محصول
+    await this.prisma.$transaction([
+      this.prisma.like.create({
         data: {
-          userId,
-          productId,
+          product: { connect: { id: productId } },
+          user: { connect: { id: userId } },
         },
-      });
-    } catch (error) {
-      if (
-        error instanceof PrismaClientKnownRequestError &&
-        error.code === 'P2002'
-      ) {
-        return;
-      }
-      throw error;
-    }
+      }),
+      this.prisma.product.update({
+        where: { id: productId },
+        data: { likesCount: { increment: 1 } },
+      }),
+    ]);
+    return { liked: true };
   }
 
-  private async adjustLikesCount(
-    tx: PrismaNamespace.TransactionClient,
-    productId: bigint,
-    delta: number,
-  ): Promise<void> {
-    if (delta >= 0) {
-      const data: PrismaNamespace.ProductUpdateInput = {};
-      (data as Record<string, unknown>).likesCount = { increment: delta };
-      await tx.product.update({
-        where: { id: productId },
-        data,
-      });
-      return;
+  /** لیست محصولات لایک‌شده‌ی کاربر (Load more با cursor: createdAt, productId) */
+  async listForUser(
+    userId: string,
+    limit = 24,
+    cursor?: string,
+  ): Promise<UserLikesResultDto> {
+    const take = Math.min(Math.max(limit, 1), 60);
+
+    type CursorT = { createdAt: string; productId: string };
+    const c = decodeCursor<CursorT>(cursor);
+
+    let cursorWhere: Prisma.LikeWhereInput | undefined;
+    if (c) {
+      const createdAt = new Date(c.createdAt);
+      const pid = BigInt(c.productId);
+      cursorWhere = {
+        OR: [
+          { createdAt: { lt: createdAt } },
+          { AND: [{ createdAt: createdAt }, { productId: { lt: pid } }] },
+        ],
+      };
     }
 
-    const absoluteDelta = Math.abs(delta);
-    const where: PrismaNamespace.ProductWhereInput = { id: productId };
-    (where as Record<string, unknown>).likesCount = { gte: absoluteDelta };
+    const where: Prisma.LikeWhereInput = cursorWhere
+      ? { AND: [{ userId }, cursorWhere] }
+      : { userId };
 
-    const decrementData: PrismaNamespace.ProductUpdateManyMutationInput = {};
-    (decrementData as Record<string, unknown>).likesCount = {
-      decrement: absoluteDelta,
-    };
-
-    const updated = await tx.product.updateMany({
+    const rows = await this.prisma.like.findMany({
       where,
-      data: decrementData,
+      orderBy: [{ createdAt: 'desc' }, { productId: 'desc' }], // ⬅️ به‌جای id
+      take,
+      include: { product: { include: productInclude } },
     });
 
-    if (updated.count === 0) {
-      const resetData: PrismaNamespace.ProductUpdateInput = {};
-      (resetData as Record<string, unknown>).likesCount = 0;
-      await tx.product.update({
-        where: { id: productId },
-        data: resetData,
+    const typed = rows as LikeWithProduct[];
+
+    const items: UserLikeItemDto[] = typed.map((l) => ({
+      product: ProductMapper.toBrief(l.product as ProductWithRelations),
+      likedAt: l.createdAt.toISOString(),
+    }));
+
+    let nextCursor: string | undefined;
+    if (typed.length === take) {
+      const last = typed[typed.length - 1];
+      nextCursor = encodeCursor({
+        createdAt: last.createdAt.toISOString(),
+        productId: String(last.productId),
       });
     }
+
+    return { items, nextCursor };
   }
 }

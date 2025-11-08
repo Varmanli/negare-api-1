@@ -2,7 +2,7 @@
  * Decorator helpers to declare required role names on route handlers for RolesGuard.
  */
 import { SetMetadata } from '@nestjs/common';
-import { RoleName } from '@app/prisma/prisma.constants';
+import { RoleName } from '@prisma/client';
 
 /**
  * Metadata key used to store role requirements on route handlers.

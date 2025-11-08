@@ -1,171 +1,141 @@
 import {
-  BadRequestException,
-  ForbiddenException,
   Injectable,
+  BadRequestException,
   NotFoundException,
-  HttpException,
-  HttpStatus,
-  UnauthorizedException,
 } from '@nestjs/common';
-import { PricingType } from '@app/prisma/prisma.constants';
-import { PrismaService } from '@app/prisma/prisma.service';
+import { Prisma } from '@prisma/client';
+import { Buffer } from 'buffer';
+import { PrismaService } from '../../prisma/prisma.service';
 import { CountersService } from '../counters/counters.service';
+import { DownloadStartDto } from './dtos/download-start.dto';
+import {
+  DownloadCreatedDto,
+  UserDownloadItemDto,
+  UserDownloadsResultDto,
+} from './dtos/download-response.dto';
+import {
+  ProductMapper,
+  productInclude,
+  type ProductWithRelations,
+} from '../product/product.mapper';
 import { StorageService } from '../storage/storage.service';
 
-const DAILY_CAP = 15;
-const TWENTY_FOUR_HOURS = 24 * 60 * 60 * 1000;
-
-export interface DownloadResult {
-  stream: NodeJS.ReadableStream;
-  filename?: string | null;
-  mimeType?: string | null;
-  size?: number;
-  downloadsCount: number;
+function encodeCursor(obj: Record<string, string | number>) {
+  return Buffer.from(JSON.stringify(obj), 'utf8').toString('base64url');
+}
+function decodeCursor<T>(cursor?: string | null): T | null {
+  if (!cursor) return null;
+  try {
+    const json = Buffer.from(cursor, 'base64url').toString('utf8');
+    return JSON.parse(json) as T;
+  } catch {
+    return null;
+  }
+}
+function toBigIntOrThrow(id: string): bigint {
+  if (!/^\d+$/.test(id)) throw new BadRequestException('Invalid product id');
+  return BigInt(id);
 }
 
 @Injectable()
 export class DownloadsService {
   constructor(
     private readonly prisma: PrismaService,
-    private readonly countersService: CountersService,
-    private readonly storageService: StorageService,
+    private readonly counters: CountersService,
+    private readonly storage: StorageService, // LocalStorageService در ماژول bind شده
   ) {}
 
-  async enforceDailyCap(userId: string): Promise<void> {
-    const windowStart = new Date(Date.now() - TWENTY_FOUR_HOURS);
-
-    const downloadCount = await this.prisma.productDownload.count({
-      where: {
-        userId,
-        createdAt: { gte: windowStart },
-      },
-    });
-
-    if (downloadCount >= DAILY_CAP) {
-      throw new HttpException(
-        'Daily download limit reached. Please try again later.',
-        HttpStatus.TOO_MANY_REQUESTS,
-      );
-    }
-  }
-
-  async downloadProduct(
-    productId: string,
-    userId?: string,
-  ): Promise<DownloadResult> {
-    if (!userId) {
-      throw new UnauthorizedException(
-        'Authentication is required to download this product',
-      );
-    }
-
-    const numericId = this.ensureNumericId(productId);
+  /**
+   * ثبت دانلود برای کاربر و (در صورت وجود فایل) برگرداندن URL دانلود
+   * این متد کنترل دسترسی/قیمت‌گذاری را ساده فرض می‌کند؛ اگر Paywall داری همین‌جا چک کن.
+   */
+  async start(
+    userId: string,
+    productIdStr: string,
+    dto: DownloadStartDto,
+  ): Promise<DownloadCreatedDto> {
+    const productId = toBigIntOrThrow(productIdStr);
 
     const product = await this.prisma.product.findUnique({
-      where: { id: numericId },
-      select: {
-        id: true,
-        pricingType: true,
-        downloadsCount: true,
-        file: {
-          select: {
-            id: true,
-            storageKey: true,
-            originalName: true,
-            size: true,
-            mimeType: true,
-            createdAt: true,
-          },
-        },
-      },
+      where: { id: productId },
+      include: { file: true },
     });
+    if (!product) throw new NotFoundException('Product not found');
 
-    if (!product || !product.file) {
-      throw new NotFoundException('Product file not found');
-    }
+    // افزایش شمارنده
+    await this.counters.bump(productId, 'downloads', 1);
 
-    await this.enforceDailyCap(userId);
-    await this.checkPricingRequirements(
-      { id: product.id, pricingType: product.pricingType },
-      userId,
-    );
-
+    // ✅ ساخت رکورد دانلود با connect روابط (نه با productId/userId مستقیم)
     await this.prisma.productDownload.create({
       data: {
-        productId: numericId,
-        userId,
+        product: { connect: { id: productId } },
+        user: { connect: { id: userId } },
+        // اگر مدل این فیلدها رو داره
+        ...(dto.bytes !== undefined ? { bytes: BigInt(dto.bytes) } : {}),
+        ...(dto.pricePaid !== undefined ? { pricePaid: dto.pricePaid } : {}),
       },
     });
 
-    await this.countersService.incrementDownloads(productId);
+    // ✅ لینک دانلود
+    let url: string | undefined;
+    if (product.file?.storageKey) {
+      url = await this.storage.getDownloadUrl(product.file.storageKey);
+    }
 
-    const refreshed = await this.prisma.product.findUnique({
-      where: { id: numericId },
-      select: { downloadsCount: true },
+    return { url };
+  }
+
+  /** لیست دانلودهای کاربر (cursor: createdAt,id) newest-first */
+  async listForUser(
+    userId: string,
+    limit = 24,
+    cursor?: string,
+  ): Promise<UserDownloadsResultDto> {
+    const take = Math.min(Math.max(limit, 1), 60);
+
+    type CursorT = { createdAt: string; id: string };
+    const c = decodeCursor<CursorT>(cursor);
+    let cursorWhere: Prisma.ProductDownloadWhereInput | undefined;
+
+    if (c) {
+      const createdAt = new Date(c.createdAt);
+      const id = BigInt(c.id);
+      cursorWhere = {
+        OR: [
+          { createdAt: { lt: createdAt } },
+          { AND: [{ createdAt: createdAt }, { id: { lt: id } }] },
+        ],
+      };
+    }
+
+    const where: Prisma.ProductDownloadWhereInput = cursorWhere
+      ? { AND: [{ userId }, cursorWhere] }
+      : { userId };
+
+    const rows = await this.prisma.productDownload.findMany({
+      where,
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+      take,
+      include: { product: { include: productInclude } },
     });
 
-    const stream = this.storageService.getDownloadStream(
-      product.file.storageKey,
-    );
-    const downloadsCount =
-      refreshed?.downloadsCount ?? product.downloadsCount + 1;
+    const items: UserDownloadItemDto[] = rows.map((d) => ({
+      product: ProductMapper.toBrief(d.product as ProductWithRelations),
+      downloadedAt: d.createdAt.toISOString(),
+      bytes:
+        d.bytes !== null && d.bytes !== undefined ? Number(d.bytes) : undefined,
+      pricePaid: d.pricePaid ?? undefined,
+    }));
 
-    return {
-      stream,
-      filename: product.file.originalName ?? null,
-      mimeType: product.file.mimeType ?? null,
-      size: product.file.size ? Number(product.file.size) : undefined,
-      downloadsCount,
-    };
-  }
-
-  private async checkPricingRequirements(
-    product: { id: bigint; pricingType: PricingType },
-    userId: string,
-  ): Promise<void> {
-    switch (product.pricingType) {
-      case PricingType.PAID: {
-        const owns = await this.checkPaidOwnership(userId, product.id);
-        if (!owns) {
-          throw new ForbiddenException(
-            'Purchase required to download this product.',
-          );
-        }
-        break;
-      }
-      case PricingType.SUBSCRIPTION:
-      case PricingType.PAID_OR_SUBSCRIPTION: {
-        const active = await this.checkActiveSubscription(userId);
-        if (!active) {
-          throw new ForbiddenException(
-            'Active subscription required to download this product.',
-          );
-        }
-        break;
-      }
-      default:
-        break;
+    let nextCursor: string | undefined;
+    if (rows.length === take) {
+      const last = rows[rows.length - 1];
+      nextCursor = encodeCursor({
+        createdAt: last.createdAt.toISOString(),
+        id: String(last.id),
+      });
     }
-  }
 
-  private async checkPaidOwnership(
-    userId: string,
-    productId: bigint,
-  ): Promise<boolean> {
-    void userId;
-    void productId;
-    return true;
-  }
-
-  private async checkActiveSubscription(userId: string): Promise<boolean> {
-    void userId;
-    return true;
-  }
-
-  private ensureNumericId(productId: string): bigint {
-    if (!/^\d+$/.test(productId)) {
-      throw new BadRequestException('Product id must be numeric');
-    }
-    return BigInt(productId);
+    return { items, nextCursor };
   }
 }

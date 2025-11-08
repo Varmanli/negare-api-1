@@ -57,8 +57,6 @@ const applyPrefixIfNeeded = (path: string, prefix: string): string => {
   return combined.replace(/\/{2,}/g, '/');
 };
 
-const resolveCookiePath = (): string => '/';
-
 export const authEnvSchema = z.object({
   ACCESS_JWT_SECRET: z
     .string()
@@ -68,7 +66,7 @@ export const authEnvSchema = z.object({
     .string()
     .min(1, { message: 'REFRESH_JWT_SECRET must be provided' }),
   REFRESH_JWT_EXPIRES: z.string().default('30d'),
-  COOKIE_SAMESITE: z.enum(['strict', 'lax', 'none']).default('lax'),
+  COOKIE_SAMESITE: z.enum(['strict', 'lax', 'none']).default('none'),
   COOKIE_SECURE: booleanLike,
   COOKIE_REFRESH_PATH: z.string().default('/auth/refresh'),
   COOKIE_ACCESS_PATH: z.string().default('/'),
@@ -92,11 +90,22 @@ export interface AuthConfig {
 export const authConfig = registerAs('auth', (): AuthConfig => {
   const raw = authEnvSchema.parse(process.env);
   const nodeEnv = (process.env.NODE_ENV ?? 'development').toLowerCase();
-  const globalPrefix = sanitizePrefix(process.env.GLOBAL_PREFIX);
-  const refreshCookiePath = resolveCookiePath();
+  const globalPrefix = sanitizePrefix(
+    process.env.GLOBAL_PREFIX !== undefined
+      ? process.env.GLOBAL_PREFIX
+      : 'api',
+  );
+  const refreshCookiePath = applyPrefixIfNeeded(
+    raw.COOKIE_REFRESH_PATH,
+    globalPrefix,
+  );
 
-  let secure = raw.COOKIE_SECURE ?? nodeEnv === 'production';
-  if (raw.COOKIE_SAMESITE === 'none' && secure === false) {
+  let secure =
+    typeof raw.COOKIE_SECURE === 'boolean'
+      ? raw.COOKIE_SECURE
+      : nodeEnv === 'production';
+
+  if (raw.COOKIE_SAMESITE === 'none' && nodeEnv === 'production') {
     secure = true;
   }
 
@@ -108,7 +117,7 @@ export const authConfig = registerAs('auth', (): AuthConfig => {
     cookie: {
       sameSite: raw.COOKIE_SAMESITE,
       secure,
-      refreshPath: refreshCookiePath,
+      refreshPath: refreshCookiePath || '/',
       accessPath: applyPrefixIfNeeded(raw.COOKIE_ACCESS_PATH, globalPrefix),
     },
   };

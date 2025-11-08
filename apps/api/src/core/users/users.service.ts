@@ -3,7 +3,7 @@ import {
   NotFoundException,
   UnauthorizedException,
 } from '@nestjs/common';
-import { Prisma, User } from '@prisma/client';
+import type { Prisma } from '@prisma/client';
 import { createHash } from 'node:crypto';
 import { PrismaService } from '@app/prisma/prisma.service';
 import { FindUsersQueryDto } from './dto/find-users-query.dto';
@@ -11,12 +11,12 @@ import { CreateUserDto } from './dto/create-user.dto';
 import { UpdateUserDto } from './dto/update-user.dto';
 
 /** include واحد و تایپ همگام با Prisma */
-const userWithRelations = Prisma.validator<Prisma.UserDefaultArgs>()({
+const userWithRelations = {
   include: {
     userRoles: { include: { role: true } },
     wallet: true,
   },
-});
+} satisfies Prisma.UserDefaultArgs;
 export type UserWithRelations = Prisma.UserGetPayload<typeof userWithRelations>;
 
 @Injectable()

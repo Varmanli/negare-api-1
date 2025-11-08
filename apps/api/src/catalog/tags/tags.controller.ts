@@ -3,103 +3,74 @@ import {
   Controller,
   Delete,
   Get,
+  Param,
+  Patch,
+  Post,
+  Query,
   HttpCode,
   HttpStatus,
-  Param,
-  Post,
-  Put,
-  UseGuards,
 } from '@nestjs/common';
 import {
-  ApiBearerAuth,
-  ApiCookieAuth,
+  ApiOkResponse,
   ApiOperation,
-  ApiResponse,
   ApiTags,
+  ApiCreatedResponse,
+  ApiNoContentResponse,
 } from '@nestjs/swagger';
 import { TagsService } from './tags.service';
-import { CreateTagDto } from './dtos/create-tag.dto';
-import { UpdateTagDto } from './dtos/update-tag.dto';
-import { TagResponseDto } from './dtos/tag-response.dto';
-import { JwtAuthGuard } from '@app/core/auth/guards/jwt-auth.guard';
-import { RolesGuard } from '@app/common/guards/roles.guard';
-import { Roles } from '@app/common/decorators/roles.decorator';
-import { RoleName } from '@app/prisma/prisma.constants';
+import { CreateTagDto } from './dtos/tag-create.dto';
+import { UpdateTagDto } from './dtos/tag-update.dto';
+import { TagFindQueryDto } from './dtos/tag-query.dto';
+import { TagDto, TagListResultDto } from './dtos/tag-response.dto';
 
-@ApiTags('Catalog Tags')
+@ApiTags('Catalog / Tags')
 @Controller('catalog/tags')
 export class TagsController {
-  constructor(private readonly tagsService: TagsService) {}
-
-  @Get()
-  @ApiOperation({
-    summary: 'List tags',
-    description: 'Returns all catalog tags for filtering and metadata.',
-  })
-  @ApiResponse({
-    status: 200,
-    description: 'Tags fetched successfully.',
-    type: TagResponseDto,
-    isArray: true,
-  })
-  findAll(): Promise<TagResponseDto[]> {
-    return this.tagsService.findAll();
-  }
+  constructor(private readonly service: TagsService) {}
 
   @Post()
-  @UseGuards(JwtAuthGuard, RolesGuard)
-  @Roles(RoleName.ADMIN)
-  @ApiBearerAuth()
-  @ApiCookieAuth('refresh_token')
-  @ApiOperation({
-    summary: 'Create tag',
-    description: 'Creates a new tag for product classification.',
-  })
-  @ApiResponse({
-    status: 201,
-    description: 'Tag created successfully.',
-    type: TagResponseDto,
-  })
-  create(@Body() dto: CreateTagDto): Promise<TagResponseDto> {
-    return this.tagsService.create(dto);
+  @ApiOperation({ summary: 'Create a tag' })
+  @ApiCreatedResponse({ type: TagDto })
+  async create(@Body() dto: CreateTagDto): Promise<TagDto> {
+    return this.service.create(dto);
   }
 
-  @Put(':id')
-  @UseGuards(JwtAuthGuard, RolesGuard)
-  @Roles(RoleName.ADMIN)
-  @ApiBearerAuth()
-  @ApiCookieAuth('refresh_token')
-  @ApiOperation({
-    summary: 'Update tag',
-    description: 'Updates tag metadata.',
-  })
-  @ApiResponse({
-    status: 200,
-    description: 'Tag updated successfully.',
-    type: TagResponseDto,
-  })
-  update(
+  @Patch(':id')
+  @ApiOperation({ summary: 'Update a tag' })
+  @ApiOkResponse({ type: TagDto })
+  async update(
     @Param('id') id: string,
     @Body() dto: UpdateTagDto,
-  ): Promise<TagResponseDto> {
-    return this.tagsService.update(id, dto);
+  ): Promise<TagDto> {
+    return this.service.update(id, dto);
+  }
+
+  @Get(':idOrSlug')
+  @ApiOperation({ summary: 'Find a tag by id or slug' })
+  @ApiOkResponse({ type: TagDto })
+  async findOne(@Param('idOrSlug') idOrSlug: string): Promise<TagDto> {
+    return this.service.findOne(idOrSlug);
+  }
+
+  @Get()
+  @ApiOperation({ summary: 'List tags (flat)' })
+  @ApiOkResponse({ type: TagListResultDto })
+  async findAll(@Query() q: TagFindQueryDto): Promise<TagListResultDto> {
+    return this.service.findAll(q);
+  }
+
+  @Get('/popular/top')
+  @ApiOperation({ summary: 'Top tags by usage count' })
+  @ApiOkResponse({ type: TagListResultDto })
+  async popular(@Query('limit') limit = '20'): Promise<TagListResultDto> {
+    return this.service.popular(Number(limit));
   }
 
   @Delete(':id')
-  @UseGuards(JwtAuthGuard, RolesGuard)
-  @Roles(RoleName.ADMIN)
-  @ApiBearerAuth()
-  @ApiCookieAuth('refresh_token')
+  @ApiOperation({ summary: 'Delete a tag (removes product links first)' })
   @HttpCode(HttpStatus.NO_CONTENT)
-  @ApiOperation({
-    summary: 'Delete tag',
-    description: 'Removes a tag by identifier.',
-  })
-  @ApiResponse({
-    status: 204,
-    description: 'Tag removed successfully.',
-  })
+  @ApiNoContentResponse()
   async remove(@Param('id') id: string): Promise<void> {
-    await this.tagsService.remove(id);
+    await this.service.remove(id);
   }
 }

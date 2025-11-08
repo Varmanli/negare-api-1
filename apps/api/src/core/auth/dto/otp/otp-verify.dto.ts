@@ -9,7 +9,7 @@ import {
   Matches,
 } from 'class-validator';
 import { Transform } from 'class-transformer';
-import { OtpChannel, OtpPurpose } from '@app/prisma/prisma.constants';
+import { OtpChannel, OtpPurpose } from '@prisma/client';
 
 /**
  * DTO for verifying a previously requested OTP.

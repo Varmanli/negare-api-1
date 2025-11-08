@@ -37,6 +37,7 @@ const envSchema = z
     // Optional app-wide settings
     GLOBAL_PREFIX: z.string().optional(),
     MOCK_AUTH_ENABLED: z.string().optional(),
+    FRONTEND_URL: z.string().default('http://localhost:3000'),
   })
   .passthrough();
 

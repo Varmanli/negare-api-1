@@ -8,9 +8,9 @@ import { ConfigService } from '@nestjs/config';
 import type { JwtPayload, Secret, SignOptions } from 'jsonwebtoken';
 import { decode, sign, verify } from 'jsonwebtoken';
 import type Redis from 'ioredis';
-import { RoleName } from '@app/prisma/prisma.constants';
 import type { AllConfig } from '@app/config/config.module';
 import { parseDurationToSeconds } from '@app/shared/utils/parse-duration.util';
+import { RoleName } from '@prisma/client';
 
 /* ===================== Types ===================== */
 

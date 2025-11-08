@@ -9,6 +9,7 @@ import { ConfigService } from '@nestjs/config';
 import { AuthController } from '@app/core/auth/auth.controller';
 import { PasswordService } from '@app/core/auth/password/password.service';
 import { RefreshService } from '@app/core/auth/refresh.service';
+import { RefreshRateLimitService } from '@app/core/auth/refresh-rate-limit.service';
 import { SessionService } from '@app/core/auth/session/session.service';
 import { TokenService } from '@app/core/auth/token/token.service';
 import { JwtAuthGuard } from '@app/core/auth/guards/jwt-auth.guard';
@@ -29,7 +30,7 @@ const authConfig = {
   cookie: {
     sameSite: 'lax' as const,
     secure: false,
-    refreshPath: '/',
+    refreshPath: '/api/auth/refresh',
     accessPath: '/',
   },
 };
@@ -106,6 +107,7 @@ describe('Auth flows (e2e)', () => {
         TokenService,
         SessionService,
         RefreshService,
+        RefreshRateLimitService,
         { provide: PasswordService, useClass: StubPasswordService },
         { provide: ProfileService, useClass: StubProfileService },
         { provide: ConfigService, useClass: ConfigServiceStub },
@@ -162,7 +164,7 @@ describe('Auth flows (e2e)', () => {
       : [];
     const firstCookie = cookies[0] ?? '';
     expect(firstCookie).toContain('refresh_token=');
-    expect(firstCookie).toContain('Path=/');
+    expect(firstCookie).toContain('Path=/api/auth/refresh');
     expect(firstCookie).toContain('HttpOnly');
     expect(firstCookie).toMatch(/SameSite=Lax/i);
     expect(res.headers['cache-control']).toContain('no-store');
@@ -173,7 +175,8 @@ describe('Auth flows (e2e)', () => {
     const res = await agent
       .post('/api/auth/refresh')
       .set('Origin', 'http://localhost:3000')
-      .send()
+      .set('Content-Type', 'application/json')
+      .send({})
       .expect(200);
 
     expect(res.body.success).toBe(true);
@@ -187,13 +190,18 @@ describe('Auth flows (e2e)', () => {
     expect(cookies).toEqual(
       expect.arrayContaining([expect.stringContaining('refresh_token=')]),
     );
-    expect(cookies.join(';')).toContain('Path=/');
+    expect(cookies.join(';')).toContain('Path=/api/auth/refresh');
     expect(cookies.join(';')).toContain('HttpOnly');
   });
 
   it('GET /api/core/profile succeeds with bearer token', async () => {
     // refresh again to ensure we have a fresh access token
-    const refreshRes = await agent.post('/api/auth/refresh').send().expect(200);
+    const refreshRes = await agent
+      .post('/api/auth/refresh')
+      .set('Origin', 'http://localhost:3000')
+      .set('Content-Type', 'application/json')
+      .send({})
+      .expect(200);
     const accessToken = refreshRes.body.data.accessToken;
 
     const res = await agent
@@ -220,7 +228,7 @@ describe('Auth flows (e2e)', () => {
       : [];
     expect(cookies.length).toBeGreaterThanOrEqual(1);
     expect(cookies.join(';')).toContain('Expires=Thu, 01 Jan 1970 00:00:00 GMT');
-    expect(cookies.join(';')).toContain('Path=/');
+    expect(cookies.join(';')).toContain('Path=/api/auth/refresh');
   });
 
   it('CORS preflight honours credentials for auth endpoints', async () => {

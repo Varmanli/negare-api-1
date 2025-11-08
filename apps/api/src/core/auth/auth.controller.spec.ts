@@ -1,3 +1,4 @@
+import { UnauthorizedException } from '@nestjs/common';
 import type { Request } from 'express';
 import { AuthController } from './auth.controller';
 
@@ -9,14 +10,23 @@ const authConfig = {
   cookie: {
     sameSite: 'lax' as const,
     secure: false,
-    refreshPath: '/',
+    refreshPath: '/api/auth/refresh',
     accessPath: '/',
   },
 };
 
 class ConfigStub {
-  get() {
-    return authConfig;
+  get<T = unknown>(key: string): T | undefined {
+    switch (key) {
+      case 'auth':
+        return authConfig as T;
+      case 'FRONTEND_URL':
+        return 'http://localhost:3000' as T;
+      case 'CORS_ORIGIN':
+        return 'http://localhost:3000' as T;
+      default:
+        return undefined;
+    }
   }
 }
 
@@ -47,7 +57,11 @@ const createResponseStub = () => {
 const baseRequest = (): Request =>
   ({
     cookies: {},
-    headers: { 'user-agent': 'jest' } as any,
+    headers: {
+      'user-agent': 'jest',
+      origin: 'http://localhost:3000',
+      'content-type': 'application/json',
+    } as any,
     ips: [],
     ip: '127.0.0.1',
     socket: { remoteAddress: '127.0.0.1' } as any,
@@ -72,22 +86,14 @@ describe('AuthController', () => {
         accessToken: 'access-rotated',
         refreshToken: newRefreshToken,
       }),
-      peekPayload: jest.fn().mockImplementation(async (_token: string) => ({
-        sub: 'user-1',
-        sid: 'sess-1',
-        jti: 'jti-1',
-        typ: 'refresh',
-      })),
       revoke: jest.fn().mockResolvedValue(undefined),
     };
     const sessionService = {
       create: jest.fn().mockResolvedValue({ id: 'sess-1', userId: 'user-1' }),
-      touch: jest.fn().mockResolvedValue(undefined),
       revoke: jest.fn().mockResolvedValue(undefined),
-      findSessionByJti: jest.fn().mockResolvedValue({
-        userId: 'user-1',
-        sessionId: 'sess-1',
-      }),
+    };
+    const rateLimit = {
+      consume: jest.fn().mockResolvedValue(undefined),
     };
 
     const controller = new AuthController(
@@ -95,9 +101,16 @@ describe('AuthController', () => {
       refreshService as any,
       sessionService as any,
       new ConfigStub() as any,
+      rateLimit as any,
     );
 
-    return { controller, passwordService, refreshService, sessionService };
+    return {
+      controller,
+      passwordService,
+      refreshService,
+      sessionService,
+      rateLimit,
+    };
   };
 
   it('logins, sets refresh cookie, and returns access token', async () => {
@@ -123,7 +136,7 @@ describe('AuthController', () => {
       value: refreshToken,
       options: expect.objectContaining({
         httpOnly: true,
-        path: '/',
+        path: '/api/auth/refresh',
         sameSite: 'lax',
       }),
     });
@@ -131,33 +144,45 @@ describe('AuthController', () => {
     expect(res.headers['Vary']).toContain('Cookie');
   });
 
-  it('refreshes tokens, rotates cookie, and touches session', async () => {
-    const { controller, refreshService, sessionService } = createController();
+  it('refreshes tokens, rotates cookie, and rate-limits per ip+ua', async () => {
+    const { controller, refreshService, rateLimit } = createController();
     const req = {
       ...baseRequest(),
+      headers: {
+        ...baseRequest().headers,
+        cookie: `refresh_token=${refreshToken}`,
+      },
       cookies: { refresh_token: refreshToken },
     } as Request;
     const res = createResponseStub();
 
-    const result = await controller.refresh(req, {} as any, res);
+    const result = await controller.refresh(req, res);
 
+    expect(rateLimit.consume).toHaveBeenCalledWith('127.0.0.1|jest');
     expect(refreshService.refresh).toHaveBeenCalledWith(refreshToken);
-    expect(result.accessToken).toBe('access-rotated');
+    expect(result).toEqual({
+      success: true,
+      data: { accessToken: 'access-rotated' },
+    });
     expect(res.cookies[0]).toMatchObject({
       name: 'refresh_token',
       value: newRefreshToken,
-      options: expect.objectContaining({ path: '/' }),
+      options: expect.objectContaining({ path: '/api/auth/refresh' }),
     });
-    expect(sessionService.touch).toHaveBeenCalledWith('user-1', 'sess-1');
-    expect(res.cleared.map((c) => c.options.path)).toEqual([
-      '/api/auth',
-      '/api',
-      '/',
-    ]);
   });
 
-  it('logs out, revokes refresh token, and clears cookies', async () => {
-    const { controller, refreshService, sessionService } = createController();
+  it('throws when refresh cookie is missing', async () => {
+    const { controller } = createController();
+    const req = baseRequest();
+    const res = createResponseStub();
+
+    await expect(controller.refresh(req, res)).rejects.toBeInstanceOf(
+      UnauthorizedException,
+    );
+  });
+
+  it('logs out, revokes refresh token, and clears cookie once', async () => {
+    const { controller, refreshService } = createController();
     const req = {
       ...baseRequest(),
       cookies: { refresh_token: refreshToken },
@@ -167,11 +192,10 @@ describe('AuthController', () => {
     const result = await controller.logout(req, {} as any, res);
     expect(result.success).toBe(true);
     expect(refreshService.revoke).toHaveBeenCalledWith(refreshToken);
-    expect(sessionService.revoke).toHaveBeenCalledWith('user-1', 'sess-1');
-    expect(res.cleared.map((c) => c.options.path)).toEqual([
-      '/api/auth',
-      '/api',
-      '/',
-    ]);
+    expect(res.cleared).toHaveLength(1);
+    expect(res.cleared[0]).toMatchObject({
+      name: 'refresh_token',
+      options: expect.objectContaining({ path: '/api/auth/refresh' }),
+    });
   });
 });

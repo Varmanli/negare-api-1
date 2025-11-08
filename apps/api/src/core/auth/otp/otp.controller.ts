@@ -16,10 +16,10 @@ import {
 import type { Request, Response } from 'express';
 import { Public } from '@app/common/decorators/public.decorator';
 import { OtpService } from './otp.service';
-import { OtpPurpose } from '@app/prisma/prisma.constants';
 import { RequestOtpDto } from '../dto/otp/otp-request.dto';
 import { ResendOtpDto } from '../dto/otp/otp-resend.dto';
 import { VerifyOtpDto } from '../dto/otp/otp-verify.dto';
+import { OtpPurpose } from '@prisma/client';
 
 @ApiTags('Authentication - OTP')
 @Controller('auth/otp')

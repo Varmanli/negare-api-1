@@ -9,9 +9,9 @@ import {
 } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
 import { Request } from 'express';
-import { RoleName } from '@app/prisma/prisma.constants';
 import { CurrentUserPayload } from '../decorators/current-user.decorator';
 import { ROLES_KEY } from '../decorators/roles.decorator';
+import { RoleName } from '@prisma/client';
 
 @Injectable()
 /**
@@ -25,11 +25,10 @@ export class RolesGuard implements CanActivate {
    * @throws ForbiddenException when no user context exists or required roles are missing.
    */
   canActivate(context: ExecutionContext): boolean {
-    const requiredRoles =
-      this.reflector.getAllAndOverride<RoleName[]>(ROLES_KEY, [
-        context.getHandler(),
-        context.getClass(),
-      ]);
+    const requiredRoles = this.reflector.getAllAndOverride<RoleName[]>(
+      ROLES_KEY,
+      [context.getHandler(), context.getClass()],
+    );
 
     if (!requiredRoles || requiredRoles.length === 0) {
       return true;

@@ -20,6 +20,7 @@ import { OtpRateLimitService } from './otp/otp-rate-limit.service';
 import { PasswordService } from './password/password.service';
 import { RefreshService } from './refresh.service';
 import { SessionService } from './session/session.service';
+import { RefreshRateLimitService } from './refresh-rate-limit.service';
 
 @Module({
   imports: [SmsModule, MailModule, RedisModule, UsersModule, TokenModule],
@@ -28,6 +29,7 @@ import { SessionService } from './session/session.service';
     OtpService,
     PasswordService,
     RefreshService,
+    RefreshRateLimitService,
     OtpRateLimitService,
     HybridAuthGuard,
     JwtAuthGuard,

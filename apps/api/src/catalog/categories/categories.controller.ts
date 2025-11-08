@@ -1,105 +1,98 @@
 import {
-  Body,
   Controller,
-  Delete,
   Get,
+  Post,
+  Patch,
+  Delete,
+  Param,
+  Body,
+  Query,
   HttpCode,
   HttpStatus,
-  Param,
-  Post,
-  Put,
-  UseGuards,
 } from '@nestjs/common';
 import {
-  ApiBearerAuth,
-  ApiCookieAuth,
-  ApiOperation,
-  ApiResponse,
   ApiTags,
+  ApiOperation,
+  ApiOkResponse,
+  ApiCreatedResponse,
+  ApiNoContentResponse,
 } from '@nestjs/swagger';
-import { CategoriesService } from './categories.service';
-import { CreateCategoryDto } from './dtos/create-category.dto';
-import { UpdateCategoryDto } from './dtos/update-category.dto';
-import { CategoryResponseDto } from './dtos/category-response.dto';
-import { JwtAuthGuard } from '@app/core/auth/guards/jwt-auth.guard';
-import { RolesGuard } from '@app/common/guards/roles.guard';
-import { Roles } from '@app/common/decorators/roles.decorator';
-import { RoleName } from '@app/prisma/prisma.constants';
 
-@ApiTags('Catalog Categories')
+import { CategoriesService } from './categories.service';
+import { CreateCategoryDto } from './dtos/category-create.dto';
+import { UpdateCategoryDto } from './dtos/category-update.dto';
+import { CategoryFindQueryDto } from './dtos/category-query.dto';
+import {
+  CategoryDto,
+  CategoryListResultDto,
+  CategoryTreeNodeDto,
+  CategoryBreadcrumbDto,
+} from './dtos/category-response.dto';
+
+@ApiTags('Catalog / Categories')
 @Controller('catalog/categories')
 export class CategoriesController {
-  constructor(private readonly categoriesService: CategoriesService) {}
-
-  @Get()
-  @ApiOperation({
-    summary: 'List categories',
-    description: 'Returns all categories with hierarchical relationships.',
-  })
-  @ApiResponse({
-    status: 200,
-    description: 'Categories fetched successfully.',
-    type: CategoryResponseDto,
-    isArray: true,
-  })
-  findAll(): Promise<CategoryResponseDto[]> {
-    return this.categoriesService.findAll();
-  }
+  constructor(private readonly service: CategoriesService) {}
 
   @Post()
-  @UseGuards(JwtAuthGuard, RolesGuard)
-  @Roles(RoleName.ADMIN)
-  @ApiBearerAuth()
-  @ApiCookieAuth('refresh_token')
-  @ApiOperation({
-    summary: 'Create category',
-    description: 'Creates a new category within the catalog hierarchy.',
-  })
-  @ApiResponse({
-    status: 201,
-    description: 'Category created successfully.',
-    type: CategoryResponseDto,
-  })
-  create(@Body() dto: CreateCategoryDto): Promise<CategoryResponseDto> {
-    return this.categoriesService.create(dto);
+  @ApiOperation({ summary: 'Create a category' })
+  @ApiCreatedResponse({ type: CategoryDto })
+  async create(@Body() dto: CreateCategoryDto): Promise<CategoryDto> {
+    return this.service.create(dto);
   }
 
-  @Put(':id')
-  @UseGuards(JwtAuthGuard, RolesGuard)
-  @Roles(RoleName.ADMIN)
-  @ApiBearerAuth()
-  @ApiCookieAuth('refresh_token')
-  @ApiOperation({
-    summary: 'Update category',
-    description: 'Updates an existing category metadata.',
-  })
-  @ApiResponse({
-    status: 200,
-    description: 'Category updated successfully.',
-    type: CategoryResponseDto,
-  })
-  update(
+  @Patch(':id')
+  @ApiOperation({ summary: 'Update a category' })
+  @ApiOkResponse({ type: CategoryDto })
+  async update(
     @Param('id') id: string,
     @Body() dto: UpdateCategoryDto,
-  ): Promise<CategoryResponseDto> {
-    return this.categoriesService.update(id, dto);
+  ): Promise<CategoryDto> {
+    return this.service.update(id, dto);
+  }
+
+  @Get(':idOrSlug')
+  @ApiOperation({ summary: 'Find category by id or slug' })
+  @ApiOkResponse({ type: CategoryDto })
+  async findOne(@Param('idOrSlug') idOrSlug: string): Promise<CategoryDto> {
+    return this.service.findOne(idOrSlug);
+  }
+
+  @Get()
+  @ApiOperation({ summary: 'List categories (flat)' })
+  @ApiOkResponse({ type: CategoryListResultDto })
+  async findAll(
+    @Query() q: CategoryFindQueryDto,
+  ): Promise<CategoryListResultDto> {
+    return this.service.findAll(q);
+  }
+
+  @Get('tree/root')
+  @ApiOperation({ summary: 'Get full category tree (all roots)' })
+  @ApiOkResponse({ type: [CategoryTreeNodeDto] })
+  async treeAll(): Promise<CategoryTreeNodeDto[]> {
+    return this.service.tree();
+  }
+
+  @Get('tree/:rootId')
+  @ApiOperation({ summary: 'Get a subtree rooted at :rootId' })
+  @ApiOkResponse({ type: [CategoryTreeNodeDto] })
+  async tree(@Param('rootId') rootId: string): Promise<CategoryTreeNodeDto[]> {
+    return this.service.tree(rootId);
+  }
+
+  @Get(':id/breadcrumbs/path')
+  @ApiOperation({ summary: 'Get breadcrumbs path for a category (root..self)' })
+  @ApiOkResponse({ type: CategoryBreadcrumbDto })
+  async breadcrumbs(@Param('id') id: string): Promise<CategoryBreadcrumbDto> {
+    return this.service.breadcrumbs(id);
   }
 
   @Delete(':id')
-  @UseGuards(JwtAuthGuard, RolesGuard)
-  @Roles(RoleName.ADMIN)
-  @ApiBearerAuth()
-  @ApiCookieAuth('refresh_token')
+  @ApiOperation({ summary: 'Delete a category (relink children to parent)' })
   @HttpCode(HttpStatus.NO_CONTENT)
-  @ApiOperation({
-    summary: 'Delete category',
-    description: 'Removes a category by identifier.',
-  })
-  @ApiResponse({
-    status: 204,
-    description: 'Category removed successfully.',
-  })
+  @ApiNoContentResponse()
   async remove(@Param('id') id: string): Promise<void> {
-    await this.categoriesService.remove(id);
+    await this.service.remove(id);
   }
 }
